@@ -305,7 +305,7 @@ def process_elements(image, elements, openai_api_key):
     for element in elements:
         cls = element["class"]
         prompt = prompts.get(cls, "Describe the content of the provided image.")
-        auxiliary_prompt = " Do not add placeholder or introductory or explainatory text like <sure heres your text> or <the text in the image is as follows> or basically anything that is outside of the task asked for. Just perform the instructed task. Response should be limited to the things that you are asked for, not anything more, nor anything less. Output must be provided in markdown format only."
+        auxiliary_prompt = "IN CASE YOU CANNOT DETECT OR HELP WITH THE EXTRACTION, ADD AN <UNK> TOKEN SIMPLY. NOTHING ELSE. Do not add placeholder or introductory or explainatory text like <sure heres your text> or <the text in the image is as follows> or basically anything that is outside of the task asked for. Just perform the instructed task. Response should be limited to the things that you are asked for, not anything more, nor anything less. Output must be provided in markdown format only."
         prompt += auxiliary_prompt
         img_str = crop_and_encode_image(image, element)
         image_data = f"data:image/png;base64,{img_str}"
