@@ -11,9 +11,8 @@ import fitz  # PyMuPDF for PDF handling
 import hashlib  # For content hashing
 import os
 import gdown
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, Preformatted, Image as RLImage
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.pagesizes import letter
+from reportlab.platypus import Image as RLImage  # Removed ReportLab PDF components
+from reportlab.lib.pagesizes import letter  # Removed ReportLab PDF components
 
 # Set page config at the very beginning
 st.set_page_config(page_title="Document Element Classification", layout="wide")
@@ -309,21 +308,12 @@ def process_elements(image, elements, openai_api_key):
     for element in elements:
         cls = element["class"]
         prompt = prompts.get(cls, "Describe the content of the provided image.")
-        auxiliary_prompt = "IN CASE YOU CANNOT DETECT OR HELP WITH THE EXTRACTION, ADD AN <UNK> TOKEN SIMPLY. NOTHING ELSE. Do not add placeholder or introductory or explainatory text like <sure heres your text> or <the text in the image is as follows> or basically anything that is outside of the task asked for. Just perform the instructed task. Response should be limited to the things that you are asked for, not anything more, nor anything less. Output must be provided in markdown format only."
+        auxiliary_prompt = " IN CASE YOU CANNOT DETECT OR HELP WITH THE EXTRACTION, ADD AN <UNK> TOKEN SIMPLY. NOTHING ELSE. Do not add placeholder or introductory or explanatory text like <sure here's your text> or <the text in the image is as follows> or basically anything that is outside of the task asked for. Just perform the instructed task. Response should be limited to the things that you are asked for, not anything more, nor anything less. Output must be provided in markdown format only."
         prompt += auxiliary_prompt
         img_str = crop_and_encode_image(image, element)
         image_data = f"data:image/png;base64,{img_str}"
 
-        content = [
-            {"type": "text", "text": prompt},
-            {
-                "type": "image_url",
-                "image_url": {
-                    "url": image_data,
-                    "detail": "auto"
-                },
-            }
-        ]
+        content = f"{prompt}\n\n![Element Image]({image_data})"
 
         try:
             response = client.chat.completions.create(
@@ -484,26 +474,6 @@ def encode_image(image):
     img_str = base64.b64encode(buffered.getvalue()).decode()
 
     return img_str
-
-def get_prompt_for_class(cls):
-    """
-    Get the prompt for a given class.
-    """
-    prompts = {
-        "Text": "Extract the text from the provided image.",
-        "Section-header": "Extract the text from the provided image.",
-        "Title": "Extract the text from the provided image.",
-        "Caption": "Extract the text from the provided image.",
-        "Footnote": "Extract the text from the provided image.",
-        "Page-header": "Extract the text from the provided image.",
-        "Page-footer": "Extract the text from the provided image.",
-        "List-item": "Extract the text from the provided image.",
-        "Table": "Generate the HTML code for the table in the provided image and provide a summary of the data in the table. The HTML should be semantically correct and use appropriate tags like <table>, <tr>, <th>, and <td>. Please output the results separated by '---'. First provide the HTML code, then a summary of the data.",
-        "Picture": "Provide a detailed description of the provided image. Extract any text/tables present in the image and give its html or markdown format, whichever is more suitable for you.",
-        "Formula": "Simplify the mathematical formula shown in the provided image. Give its latex formula if possible.",
-        "Unknown": "Describe the content of the provided image."
-    }
-    return prompts.get(cls, "Describe the content of the provided image.")
 
 def main():
     st.title("📄 Document Element Classification with Extraction")
@@ -678,72 +648,41 @@ def main():
 
             # Check if all chunks have been processed
             if st.session_state.processed_chunks == st.session_state.total_chunks and st.session_state.total_chunks > 0:
-                # Generate JSON data
-                json_data = json.dumps(st.session_state.all_results, indent=4)
-                # Encode JSON data to base64
-                b64_json = base64.b64encode(json_data.encode()).decode()
+                # Generate Markdown data
+                markdown_content = "# Document Processing Results\n\n"
 
-                # Generate PDF
-                buffer = io.BytesIO()
-                doc = SimpleDocTemplate(buffer, pagesize=letter)
-                styles = getSampleStyleSheet()
-
-                # Define a 'Code' style only if it doesn't already exist
-                if 'Code' not in styles.byName:
-                    styles.add(ParagraphStyle(name='Code', parent=styles['Normal'], fontName='Courier', fontSize=8))
-
-                elements = []
-                # For each result in all_results
                 for idx, page_results in st.session_state.all_results.items():
                     for chunk_result in page_results:
                         pages = chunk_result["pages"]
-                        elements.append(Paragraph(f"Pages: {pages}", styles['Heading2']))
-                        elements.append(Spacer(1, 12))
+                        markdown_content += f"## Pages: {pages}\n\n"
                         # Include annotated chunk image
                         annotated_image = st.session_state.chunks[idx][chunk_result["chunk_index"]]['annotated_image']
                         img_buffer = io.BytesIO()
                         annotated_image.save(img_buffer, format='PNG')
                         img_buffer.seek(0)
-                        rl_image = RLImage(img_buffer, width=400)  # Adjust width as needed
-                        elements.append(rl_image)
-                        elements.append(Spacer(1, 12))
-                        for result in chunk_result['chunk_results']:
-                            elements.append(Paragraph(f"Element {result['index']} ({result['class']}):", styles['Heading3']))
-                            if result['class'] == "Table":
-                                elements.append(Paragraph("HTML Code:", styles['Normal']))
-                                elements.append(Preformatted(result.get('html', ''), styles['Code']))
-                                elements.append(Paragraph("Summary:", styles['Normal']))
-                                elements.append(Paragraph(result.get('summary', ''), styles['Normal']))
-                            else:
-                                elements.append(Paragraph(result.get('result', ''), styles['Normal']))
-                            elements.append(Spacer(1, 12))
-                        elements.append(PageBreak())
-                # Build the PDF
-                doc.build(elements)
-                buffer.seek(0)
-                # Encode PDF data to base64
-                b64_pdf = base64.b64encode(buffer.read()).decode()
+                        img_base64 = base64.b64encode(img_buffer.read()).decode()
+                        markdown_content += f"![Annotated Image](data:image/png;base64,{img_base64})\n\n"
 
-                # JavaScript to trigger download
-                download_js = f"""
-                    <script>
-                        function downloadBase64File(contentBase64, contentType, fileName) {{
-                            const linkSource = `data:${{contentType}};base64,${{contentBase64}}`;
-                            const downloadLink = document.createElement("a");
-                            downloadLink.href = linkSource;
-                            downloadLink.download = fileName;
-                            downloadLink.click();
-                        }}
-                        // Download JSON
-                        downloadBase64File("{b64_json}", "application/json", "all_responses.json");
-                        // Download PDF
-                        downloadBase64File("{b64_pdf}", "application/pdf", "all_responses.pdf");
-                    </script>
-                """
-                # Display a message
-                st.success("All chunks processed. Your downloads will start shortly.")
-                # Inject the JavaScript into the page
-                st.markdown(download_js, unsafe_allow_html=True)
+                        for result in chunk_result['chunk_results']:
+                            markdown_content += f"### Element {result['index']} ({result['class']}):\n\n"
+                            if result['class'] == "Table":
+                                markdown_content += f"**HTML Code:**\n\n```html\n{result.get('html', '')}\n```\n\n"
+                                markdown_content += f"**Summary:**\n\n{result.get('summary', '')}\n\n"
+                            else:
+                                markdown_content += f"{result.get('result', '')}\n\n"
+                        markdown_content += "---\n\n"
+
+                # Encode Markdown data to bytes
+                markdown_bytes = markdown_content.encode('utf-8')
+
+                # Provide a download button for the Markdown file
+                st.success("All chunks processed. You can download the results below.")
+                st.download_button(
+                    label="Download Results as Markdown",
+                    data=markdown_bytes,
+                    file_name="document_processing_results.md",
+                    mime="text/markdown"
+                )
 
 def display_chunks(idx, chunks, page_numbers):
     """
@@ -752,7 +691,7 @@ def display_chunks(idx, chunks, page_numbers):
     for chunk_idx, chunk in enumerate(chunks):
         st.markdown(f"### Chunk {chunk_idx+1}")
         chunk_classes = [element['class'] for element in chunk['elements']]
-        st.write(f"**Classes in chunk:** {chunk_classes}")
+        st.write(f"**Classes in chunk:** {', '.join(chunk_classes)}")
         for element in chunk['elements']:
             st.write(f"- Element {element['index']}: {element['class']} on page {element['page_number']}")
         # Display chunk images using expander
