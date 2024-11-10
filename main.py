@@ -11,6 +11,11 @@ import fitz  # PyMuPDF for PDF handling
 import hashlib  # For content hashing
 import os
 import gdown
+# Import ReportLab for PDF generation
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, Preformatted
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.pagesizes import letter
+
 # Set page config at the very beginning
 st.set_page_config(page_title="Document Element Classification", layout="wide")
 
@@ -653,6 +658,54 @@ def main():
                             display_chunks(idx, chunks, page_numbers)
                         else:
                             st.info("Please click the button above to detect elements and create chunks.")
+
+        # Add the option to download all responses as JSON and PDF separately
+        if st.session_state.all_results:
+            st.header("Download All Responses")
+
+            # Download JSON data
+            json_data = json.dumps(st.session_state.all_results, indent=4)
+            st.download_button(
+                label="Download JSON Response",
+                data=json_data,
+                file_name="all_responses.json",
+                mime="application/json"
+            )
+
+            # Download PDF with markdown content
+            if st.button("Download All Responses as PDF"):
+                buffer = io.BytesIO()
+                doc = SimpleDocTemplate(buffer, pagesize=letter)
+                styles = getSampleStyleSheet()
+                # Define a 'Code' style
+                styles.add(ParagraphStyle(name='Code', parent=styles['Normal'], fontName='Courier', fontSize=8))
+                elements = []
+                # For each result in all_results
+                for page_idx, page_results in st.session_state.all_results.items():
+                    for chunk_result in page_results:
+                        elements.append(Paragraph(f"Pages: {chunk_result['pages']}", styles['Heading2']))
+                        elements.append(Spacer(1, 12))
+                        for result in chunk_result['chunk_results']:
+                            elements.append(Paragraph(f"Element {result['index']} ({result['class']}):", styles['Heading3']))
+                            if result['class'] == "Table":
+                                elements.append(Paragraph("HTML Code:", styles['Normal']))
+                                elements.append(Preformatted(result.get('html', ''), styles['Code']))
+                                elements.append(Paragraph("Summary:", styles['Normal']))
+                                elements.append(Paragraph(result.get('summary', ''), styles['Normal']))
+                            else:
+                                elements.append(Paragraph(result.get('result', ''), styles['Normal']))
+                            elements.append(Spacer(1, 12))
+                        elements.append(PageBreak())
+                # Build the PDF
+                doc.build(elements)
+                buffer.seek(0)
+                # Provide download button
+                st.download_button(
+                    label="Download PDF",
+                    data=buffer,
+                    file_name="all_responses.pdf",
+                    mime="application/pdf"
+                )
 
 def display_chunks(idx, chunks, page_numbers):
     """
