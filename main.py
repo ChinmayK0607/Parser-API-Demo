@@ -10,6 +10,7 @@ import json
 import fitz  # PyMuPDF for PDF handling
 import hashlib  # For content hashing
 import os
+import gdown
 # Set page config at the very beginning
 st.set_page_config(page_title="Document Element Classification", layout="wide")
 
