@@ -55,9 +55,23 @@ if 'openai_api_key' not in st.session_state:
     st.session_state.openai_api_key = ""
 
 # Function to load YOLO model with caching to improve performance
+MODEL_PATH = "models/yolov10x_best.pt"
+FILE_ID = "1jTF4xd0Pu7FDFpLTfSGjgTTolZju4_j7"  # Extracted from your shareable link
+MODEL_URL = f"https://drive.google.com/uc?id={FILE_ID}"
+
+
 @st.cache_resource
 def load_model():
-    return YOLO("models/yolov10x_best.pt")
+    if not os.path.exists(MODEL_PATH):
+        st.info("Downloading YOLO model from Google Drive...")
+        os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
+        try:
+            # Download the file using gdown
+            gdown.download(MODEL_URL, MODEL_PATH, quiet=False)
+        except Exception as e:
+            st.error(f"Error downloading the model: {e}")
+            st.stop()
+    return YOLO(MODEL_PATH)
 
 DETECTION_MODEL = load_model()
 
