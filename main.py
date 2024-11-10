@@ -687,8 +687,11 @@ def main():
                 buffer = io.BytesIO()
                 doc = SimpleDocTemplate(buffer, pagesize=letter)
                 styles = getSampleStyleSheet()
-                # Define a 'Code' style
-                styles.add(ParagraphStyle(name='Code', parent=styles['Normal'], fontName='Courier', fontSize=8))
+
+                # Define a 'Code' style only if it doesn't already exist
+                if 'Code' not in styles.byName:
+                    styles.add(ParagraphStyle(name='Code', parent=styles['Normal'], fontName='Courier', fontSize=8))
+
                 elements = []
                 # For each result in all_results
                 for idx, page_results in st.session_state.all_results.items():
