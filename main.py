@@ -11,8 +11,6 @@ import fitz  # PyMuPDF for PDF handling
 import hashlib  # For content hashing
 import os
 import gdown
-from reportlab.platypus import Image as RLImage  # Removed ReportLab PDF components
-from reportlab.lib.pagesizes import letter  # Removed ReportLab PDF components
 
 # Set page config at the very beginning
 st.set_page_config(page_title="Document Element Classification", layout="wide")
@@ -297,7 +295,7 @@ def process_elements(image, elements, openai_api_key):
         "Page-footer": "Extract the text from the provided image.",
         "List-item": "Extract the text from the provided image.",
         "Table": "Generate the HTML code for the table in the provided image and provide a summary of the data in the table. The HTML should be semantically correct and use appropriate tags like <table>, <tr>, <th>, and <td>. Please output the results separated by '---'. First provide the HTML code, then a summary of the data.",
-        "Picture": "Provide a detailed description of the provided image. Extract any text/tables present in the image and give its html or markdown format, whichever is more suitable for you.Make sure that you explain in detail any trend that you see in the picture.",
+        "Picture": "Provide a detailed description of the provided image. Extract any text/tables present in the image and give its html or markdown format, whichever is more suitable for you. Make sure that you explain in detail any trend that you see in the picture.",
         "Formula": "Simplify the mathematical formula shown in the provided image. Give its latex formula if possible.",
         "Unknown": "Describe the content of the provided image."
     }
@@ -311,9 +309,10 @@ def process_elements(image, elements, openai_api_key):
         auxiliary_prompt = " IN CASE YOU CANNOT DETECT OR HELP WITH THE EXTRACTION, ADD AN <UNK> TOKEN SIMPLY. NOTHING ELSE. Do not add placeholder or introductory or explanatory text like <sure here's your text> or <the text in the image is as follows> or basically anything that is outside of the task asked for. Just perform the instructed task. Response should be limited to the things that you are asked for, not anything more, nor anything less. Output must be provided in markdown format only."
         prompt += auxiliary_prompt
         img_str = crop_and_encode_image(image, element)
-        image_data = f"data:image/png;base64,{img_str}"
+        # Remove image embedding
+        # image_data = f"data:image/png;base64,{img_str}"
 
-        content = f"{prompt}\n\n![Element Image]({image_data})"
+        content = f"{prompt}\n\n"
 
         try:
             response = client.chat.completions.create(
@@ -461,20 +460,6 @@ def determine_dominant_class(classes):
             return cls
     return "Unknown"
 
-def encode_image(image):
-    """
-    Encode PIL image to base64 string.
-    """
-    # Maintain aspect ratio while resizing
-    max_size = (800, 800)
-    image.thumbnail(max_size, Image.LANCZOS)
-
-    buffered = io.BytesIO()
-    image.save(buffered, format="PNG")
-    img_str = base64.b64encode(buffered.getvalue()).decode()
-
-    return img_str
-
 def main():
     st.title("📄 Document Element Classification with Extraction")
 
@@ -523,6 +508,9 @@ def main():
         if 'processed_chunks' not in st.session_state:
             st.session_state.processed_chunks = 0
 
+        if 'download_triggered' not in st.session_state:
+            st.session_state.download_triggered = False
+
         # File uploader
         uploaded_files = st.file_uploader(
             "Upload up to 2 scanned document images or a PDF",
@@ -550,6 +538,7 @@ def main():
             st.session_state.all_results = {}
             st.session_state.total_chunks = 0
             st.session_state.processed_chunks = 0
+            st.session_state.download_triggered = False  # Reset download trigger
         else:
             if 'uploaded_files_contents' in st.session_state:
                 uploaded_files_contents = st.session_state.uploaded_files_contents
@@ -647,21 +636,14 @@ def main():
                             st.info("Please click the button above to detect elements and create chunks.")
 
             # Check if all chunks have been processed
-            if st.session_state.processed_chunks == st.session_state.total_chunks and st.session_state.total_chunks > 0:
-                # Generate Markdown data
+            if st.session_state.processed_chunks == st.session_state.total_chunks and st.session_state.total_chunks > 0 and not st.session_state.download_triggered:
+                # Generate Markdown data without annotated images
                 markdown_content = "# Document Processing Results\n\n"
 
                 for idx, page_results in st.session_state.all_results.items():
                     for chunk_result in page_results:
                         pages = chunk_result["pages"]
                         markdown_content += f"## Pages: {pages}\n\n"
-                        # Include annotated chunk image
-                        annotated_image = st.session_state.chunks[idx][chunk_result["chunk_index"]]['annotated_image']
-                        img_buffer = io.BytesIO()
-                        annotated_image.save(img_buffer, format='PNG')
-                        img_buffer.seek(0)
-                        img_base64 = base64.b64encode(img_buffer.read()).decode()
-                        markdown_content += f"![Annotated Image](data:image/png;base64,{img_base64})\n\n"
 
                         for result in chunk_result['chunk_results']:
                             markdown_content += f"### Element {result['index']} ({result['class']}):\n\n"
@@ -672,17 +654,33 @@ def main():
                                 markdown_content += f"{result.get('result', '')}\n\n"
                         markdown_content += "---\n\n"
 
-                # Encode Markdown data to bytes
-                markdown_bytes = markdown_content.encode('utf-8')
+                # Encode Markdown data to base64
+                b64_markdown = base64.b64encode(markdown_content.encode()).decode()
 
-                # Provide a download button for the Markdown file
-                st.success("All chunks processed. You can download the results below.")
-                st.download_button(
-                    label="Download Results as Markdown",
-                    data=markdown_bytes,
-                    file_name="document_processing_results.md",
-                    mime="text/markdown"
-                )
+                # JavaScript to trigger download automatically
+                download_js = f"""
+                    <script>
+                        function downloadFile(content, fileName, contentType) {{
+                            const blob = new Blob([content], {{ type: contentType }});
+                            const url = URL.createObjectURL(blob);
+                            const a = document.createElement('a');
+                            a.href = url;
+                            a.download = fileName;
+                            a.click();
+                            URL.revokeObjectURL(url);
+                        }}
+                        downloadFile(atob("{b64_markdown}"), "document_processing_results.md", "text/markdown");
+                    </script>
+                """
+
+                # Inject the JavaScript to trigger download
+                st.markdown(download_js, unsafe_allow_html=True)
+
+                # Update the flag to prevent multiple downloads
+                st.session_state.download_triggered = True
+
+                # Optionally, inform the user
+                st.success("All chunks processed. Your download will start automatically.")
 
 def display_chunks(idx, chunks, page_numbers):
     """
@@ -727,7 +725,6 @@ def display_chunks(idx, chunks, page_numbers):
                     "pages": page_numbers,
                     "chunk_index": chunk_idx,
                     "chunk_results": chunk_results
-                    # Remove 'annotated_image' from all_results to prevent serialization errors
                 })
 
                 # Update processed chunks count
