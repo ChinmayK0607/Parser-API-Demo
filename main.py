@@ -691,16 +691,17 @@ def main():
                 styles.add(ParagraphStyle(name='Code', parent=styles['Normal'], fontName='Courier', fontSize=8))
                 elements = []
                 # For each result in all_results
-                for page_idx, page_results in st.session_state.all_results.items():
+                for idx, page_results in st.session_state.all_results.items():
                     for chunk_result in page_results:
-                        elements.append(Paragraph(f"Pages: {chunk_result['pages']}", styles['Heading2']))
+                        pages = chunk_result["pages"]
+                        elements.append(Paragraph(f"Pages: {pages}", styles['Heading2']))
                         elements.append(Spacer(1, 12))
                         # Include annotated chunk image
+                        annotated_image = st.session_state.chunks[idx][chunk_result["chunk_index"]]['annotated_image']
                         img_buffer = io.BytesIO()
-                        chunk_image = chunk_result.get('annotated_image')
-                        chunk_image.save(img_buffer, format='PNG')
+                        annotated_image.save(img_buffer, format='PNG')
                         img_buffer.seek(0)
-                        rl_image = RLImage(img_buffer, width=400, height=300)
+                        rl_image = RLImage(img_buffer, width=400)  # Adjust width as needed
                         elements.append(rl_image)
                         elements.append(Spacer(1, 12))
                         for result in chunk_result['chunk_results']:
@@ -783,8 +784,8 @@ def display_chunks(idx, chunks, page_numbers):
                 st.session_state.all_results[idx].append({
                     "pages": page_numbers,
                     "chunk_index": chunk_idx,
-                    "chunk_results": chunk_results,
-                    "annotated_image": chunk['annotated_image']
+                    "chunk_results": chunk_results
+                    # Remove 'annotated_image' from all_results to prevent serialization errors
                 })
 
                 # Update processed chunks count
