@@ -11,7 +11,6 @@ import fitz  # PyMuPDF for PDF handling
 import hashlib  # For content hashing
 import os
 import gdown
-
 # Set page config at the very beginning
 st.set_page_config(page_title="Document Element Classification", layout="wide")
 
@@ -295,7 +294,7 @@ def process_elements(image, elements, openai_api_key):
         "Page-footer": "Extract the text from the provided image.",
         "List-item": "Extract the text from the provided image.",
         "Table": "Generate the HTML code for the table in the provided image and provide a summary of the data in the table. The HTML should be semantically correct and use appropriate tags like <table>, <tr>, <th>, and <td>. Please output the results separated by '---'. First provide the HTML code, then a summary of the data.",
-        "Picture": "Provide a detailed description of the provided image. Extract any text/tables present in the image and give its html or markdown format, whichever is more suitable for you. Make sure that you explain in detail any trend that you see in the picture.",
+        "Picture": "Provide a detailed description of the provided image. Extract any text/tables present in the image and give its html or markdown format, whichever is more suitable for you.Make sure that you explain in detail any trend that you see in the picture.",
         "Formula": "Simplify the mathematical formula shown in the provided image. Give its latex formula if possible.",
         "Unknown": "Describe the content of the provided image."
     }
@@ -306,13 +305,21 @@ def process_elements(image, elements, openai_api_key):
     for element in elements:
         cls = element["class"]
         prompt = prompts.get(cls, "Describe the content of the provided image.")
-        auxiliary_prompt = " IN CASE YOU CANNOT DETECT OR HELP WITH THE EXTRACTION, ADD AN <UNK> TOKEN SIMPLY. NOTHING ELSE. Do not add placeholder or introductory or explanatory text like <sure here's your text> or <the text in the image is as follows> or basically anything that is outside of the task asked for. Just perform the instructed task. Response should be limited to the things that you are asked for, not anything more, nor anything less. Output must be provided in markdown format only."
+        auxiliary_prompt = "IN CASE YOU CANNOT DETECT OR HELP WITH THE EXTRACTION, ADD AN <UNK> TOKEN SIMPLY. NOTHING ELSE. Do not add placeholder or introductory or explainatory text like <sure heres your text> or <the text in the image is as follows> or basically anything that is outside of the task asked for. Just perform the instructed task. Response should be limited to the things that you are asked for, not anything more, nor anything less. Output must be provided in markdown format only."
         prompt += auxiliary_prompt
         img_str = crop_and_encode_image(image, element)
-        # Remove image embedding
-        # image_data = f"data:image/png;base64,{img_str}"
+        image_data = f"data:image/png;base64,{img_str}"
 
-        content = f"{prompt}\n\n"
+        content = [
+            {"type": "text", "text": prompt},
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": image_data,
+                    "detail": "auto"
+                },
+            }
+        ]
 
         try:
             response = client.chat.completions.create(
@@ -460,6 +467,40 @@ def determine_dominant_class(classes):
             return cls
     return "Unknown"
 
+def encode_image(image):
+    """
+    Encode PIL image to base64 string.
+    """
+    # Maintain aspect ratio while resizing
+    max_size = (800, 800)
+    image.thumbnail(max_size, Image.LANCZOS)
+
+    buffered = io.BytesIO()
+    image.save(buffered, format="PNG")
+    img_str = base64.b64encode(buffered.getvalue()).decode()
+
+    return img_str
+
+def get_prompt_for_class(cls):
+    """
+    Get the prompt for a given class.
+    """
+    prompts = {
+        "Text": "Extract the text from the provided image.",
+        "Section-header": "Extract the text from the provided image.",
+        "Title": "Extract the text from the provided image.",
+        "Caption": "Extract the text from the provided image.",
+        "Footnote": "Extract the text from the provided image.",
+        "Page-header": "Extract the text from the provided image.",
+        "Page-footer": "Extract the text from the provided image.",
+        "List-item": "Extract the text from the provided image.",
+        "Table": "Generate the HTML code for the table in the provided image and provide a summary of the data in the table. The HTML should be semantically correct and use appropriate tags like <table>, <tr>, <th>, and <td>. Please output the results separated by '---'. First provide the HTML code, then a summary of the data.",
+        "Picture": "Provide a detailed description of the provided image. Extract any text/tables present in the image and give its html or markdown format, whichever is more suitable for you.",
+        "Formula": "Simplify the mathematical formula shown in the provided image. Give its latex formula if possible.",
+        "Unknown": "Describe the content of the provided image."
+    }
+    return prompts.get(cls, "Describe the content of the provided image.")
+
 def main():
     st.title("📄 Document Element Classification with Extraction")
 
@@ -502,15 +543,6 @@ def main():
         if 'all_results' not in st.session_state:
             st.session_state.all_results = {}
 
-        if 'total_chunks' not in st.session_state:
-            st.session_state.total_chunks = 0
-
-        if 'processed_chunks' not in st.session_state:
-            st.session_state.processed_chunks = 0
-
-        if 'download_triggered' not in st.session_state:
-            st.session_state.download_triggered = False
-
         # File uploader
         uploaded_files = st.file_uploader(
             "Upload up to 2 scanned document images or a PDF",
@@ -536,9 +568,6 @@ def main():
             st.session_state.detected_elements = {}
             st.session_state.chunks = {}
             st.session_state.all_results = {}
-            st.session_state.total_chunks = 0
-            st.session_state.processed_chunks = 0
-            st.session_state.download_triggered = False  # Reset download trigger
         else:
             if 'uploaded_files_contents' in st.session_state:
                 uploaded_files_contents = st.session_state.uploaded_files_contents
@@ -567,16 +596,6 @@ def main():
                 st.session_state.images_with_info = images_with_info
             else:
                 images_with_info = st.session_state.images_with_info
-
-            # Calculate total number of chunks
-            if st.session_state.total_chunks == 0:
-                total_chunks = 0
-                for idx, (image, page_numbers, page_boundary) in enumerate(images_with_info):
-                    result_image, detected_elements = detect(image, page_numbers, page_boundary)
-                    if detected_elements:
-                        chunks = improved_intelligent_chunking_with_continuity(detected_elements, SEGMENT_HIERARCHY, max_chunk_size=10)
-                        total_chunks += len(chunks)
-                st.session_state.total_chunks = total_chunks
 
             for idx, (image, page_numbers, page_boundary) in enumerate(images_with_info):
                 st.header(f"Processing Pages {page_numbers}")
@@ -635,53 +654,6 @@ def main():
                         else:
                             st.info("Please click the button above to detect elements and create chunks.")
 
-            # Check if all chunks have been processed
-            if st.session_state.processed_chunks == st.session_state.total_chunks and st.session_state.total_chunks > 0 and not st.session_state.download_triggered:
-                # Generate Markdown data without annotated images
-                markdown_content = "# Document Processing Results\n\n"
-
-                for idx, page_results in st.session_state.all_results.items():
-                    for chunk_result in page_results:
-                        pages = chunk_result["pages"]
-                        markdown_content += f"## Pages: {pages}\n\n"
-
-                        for result in chunk_result['chunk_results']:
-                            markdown_content += f"### Element {result['index']} ({result['class']}):\n\n"
-                            if result['class'] == "Table":
-                                markdown_content += f"**HTML Code:**\n\n```html\n{result.get('html', '')}\n```\n\n"
-                                markdown_content += f"**Summary:**\n\n{result.get('summary', '')}\n\n"
-                            else:
-                                markdown_content += f"{result.get('result', '')}\n\n"
-                        markdown_content += "---\n\n"
-
-                # Encode Markdown data to base64
-                b64_markdown = base64.b64encode(markdown_content.encode()).decode()
-
-                # JavaScript to trigger download automatically
-                download_js = f"""
-                    <script>
-                        function downloadFile(content, fileName, contentType) {{
-                            const blob = new Blob([content], {{ type: contentType }});
-                            const url = URL.createObjectURL(blob);
-                            const a = document.createElement('a');
-                            a.href = url;
-                            a.download = fileName;
-                            a.click();
-                            URL.revokeObjectURL(url);
-                        }}
-                        downloadFile(atob("{b64_markdown}"), "document_processing_results.md", "text/markdown");
-                    </script>
-                """
-
-                # Inject the JavaScript to trigger download
-                st.markdown(download_js, unsafe_allow_html=True)
-
-                # Update the flag to prevent multiple downloads
-                st.session_state.download_triggered = True
-
-                # Optionally, inform the user
-                st.success("All chunks processed. Your download will start automatically.")
-
 def display_chunks(idx, chunks, page_numbers):
     """
     Helper function to display chunks and process them.
@@ -689,7 +661,7 @@ def display_chunks(idx, chunks, page_numbers):
     for chunk_idx, chunk in enumerate(chunks):
         st.markdown(f"### Chunk {chunk_idx+1}")
         chunk_classes = [element['class'] for element in chunk['elements']]
-        st.write(f"**Classes in chunk:** {', '.join(chunk_classes)}")
+        st.write(f"**Classes in chunk:** {chunk_classes}")
         for element in chunk['elements']:
             st.write(f"- Element {element['index']}: {element['class']} on page {element['page_number']}")
         # Display chunk images using expander
@@ -727,8 +699,10 @@ def display_chunks(idx, chunks, page_numbers):
                     "chunk_results": chunk_results
                 })
 
-                # Update processed chunks count
-                st.session_state.processed_chunks += 1
+                # Save all results to response.json
+                with open("response.json", "w") as f:
+                    json.dump(st.session_state.all_results, f, indent=4)
+                st.success(f"Processing complete for Chunk {chunk_idx+1}. Results saved to response.json.")
 
                 # Display results for each element
                 st.markdown(f"#### Results for Chunk {chunk_idx+1}:")
