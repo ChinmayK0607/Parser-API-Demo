@@ -9,7 +9,7 @@ from openai import OpenAI
 import json
 import fitz  # PyMuPDF for PDF handling
 import hashlib  # For content hashing
-
+import os
 # Set page config at the very beginning
 st.set_page_config(page_title="Document Element Classification", layout="wide")
 
