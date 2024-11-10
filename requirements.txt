@@ -6,3 +6,4 @@ Pillow
 PyMuPDF
 openai
 gdown
+reportlab
