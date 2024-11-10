@@ -11,8 +11,7 @@ import fitz  # PyMuPDF for PDF handling
 import hashlib  # For content hashing
 import os
 import gdown
-# Import ReportLab for PDF generation
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, Preformatted
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, Preformatted, Image as RLImage
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.pagesizes import letter
 
@@ -548,6 +547,12 @@ def main():
         if 'all_results' not in st.session_state:
             st.session_state.all_results = {}
 
+        if 'total_chunks' not in st.session_state:
+            st.session_state.total_chunks = 0
+
+        if 'processed_chunks' not in st.session_state:
+            st.session_state.processed_chunks = 0
+
         # File uploader
         uploaded_files = st.file_uploader(
             "Upload up to 2 scanned document images or a PDF",
@@ -573,6 +578,8 @@ def main():
             st.session_state.detected_elements = {}
             st.session_state.chunks = {}
             st.session_state.all_results = {}
+            st.session_state.total_chunks = 0
+            st.session_state.processed_chunks = 0
         else:
             if 'uploaded_files_contents' in st.session_state:
                 uploaded_files_contents = st.session_state.uploaded_files_contents
@@ -601,6 +608,16 @@ def main():
                 st.session_state.images_with_info = images_with_info
             else:
                 images_with_info = st.session_state.images_with_info
+
+            # Calculate total number of chunks
+            if st.session_state.total_chunks == 0:
+                total_chunks = 0
+                for idx, (image, page_numbers, page_boundary) in enumerate(images_with_info):
+                    result_image, detected_elements = detect(image, page_numbers, page_boundary)
+                    if detected_elements:
+                        chunks = improved_intelligent_chunking_with_continuity(detected_elements, SEGMENT_HIERARCHY, max_chunk_size=10)
+                        total_chunks += len(chunks)
+                st.session_state.total_chunks = total_chunks
 
             for idx, (image, page_numbers, page_boundary) in enumerate(images_with_info):
                 st.header(f"Processing Pages {page_numbers}")
@@ -659,21 +676,14 @@ def main():
                         else:
                             st.info("Please click the button above to detect elements and create chunks.")
 
-        # Add the option to download all responses as JSON and PDF separately
-        if st.session_state.all_results:
-            st.header("Download All Responses")
+            # Check if all chunks have been processed
+            if st.session_state.processed_chunks == st.session_state.total_chunks and st.session_state.total_chunks > 0:
+                # Generate JSON data
+                json_data = json.dumps(st.session_state.all_results, indent=4)
+                # Encode JSON data to base64
+                b64_json = base64.b64encode(json_data.encode()).decode()
 
-            # Download JSON data
-            json_data = json.dumps(st.session_state.all_results, indent=4)
-            st.download_button(
-                label="Download JSON Response",
-                data=json_data,
-                file_name="all_responses.json",
-                mime="application/json"
-            )
-
-            # Download PDF with markdown content
-            if st.button("Download All Responses as PDF"):
+                # Generate PDF
                 buffer = io.BytesIO()
                 doc = SimpleDocTemplate(buffer, pagesize=letter)
                 styles = getSampleStyleSheet()
@@ -684,6 +694,14 @@ def main():
                 for page_idx, page_results in st.session_state.all_results.items():
                     for chunk_result in page_results:
                         elements.append(Paragraph(f"Pages: {chunk_result['pages']}", styles['Heading2']))
+                        elements.append(Spacer(1, 12))
+                        # Include annotated chunk image
+                        img_buffer = io.BytesIO()
+                        chunk_image = chunk_result.get('annotated_image')
+                        chunk_image.save(img_buffer, format='PNG')
+                        img_buffer.seek(0)
+                        rl_image = RLImage(img_buffer, width=400, height=300)
+                        elements.append(rl_image)
                         elements.append(Spacer(1, 12))
                         for result in chunk_result['chunk_results']:
                             elements.append(Paragraph(f"Element {result['index']} ({result['class']}):", styles['Heading3']))
@@ -699,13 +717,29 @@ def main():
                 # Build the PDF
                 doc.build(elements)
                 buffer.seek(0)
-                # Provide download button
-                st.download_button(
-                    label="Download PDF",
-                    data=buffer,
-                    file_name="all_responses.pdf",
-                    mime="application/pdf"
-                )
+                # Encode PDF data to base64
+                b64_pdf = base64.b64encode(buffer.read()).decode()
+
+                # JavaScript to trigger download
+                download_js = f"""
+                    <script>
+                        function downloadBase64File(contentBase64, contentType, fileName) {{
+                            const linkSource = `data:${{contentType}};base64,${{contentBase64}}`;
+                            const downloadLink = document.createElement("a");
+                            downloadLink.href = linkSource;
+                            downloadLink.download = fileName;
+                            downloadLink.click();
+                        }}
+                        // Download JSON
+                        downloadBase64File("{b64_json}", "application/json", "all_responses.json");
+                        // Download PDF
+                        downloadBase64File("{b64_pdf}", "application/pdf", "all_responses.pdf");
+                    </script>
+                """
+                # Display a message
+                st.success("All chunks processed. Your downloads will start shortly.")
+                # Inject the JavaScript into the page
+                st.markdown(download_js, unsafe_allow_html=True)
 
 def display_chunks(idx, chunks, page_numbers):
     """
@@ -749,13 +783,12 @@ def display_chunks(idx, chunks, page_numbers):
                 st.session_state.all_results[idx].append({
                     "pages": page_numbers,
                     "chunk_index": chunk_idx,
-                    "chunk_results": chunk_results
+                    "chunk_results": chunk_results,
+                    "annotated_image": chunk['annotated_image']
                 })
 
-                # Save all results to response.json
-                with open("response.json", "w") as f:
-                    json.dump(st.session_state.all_results, f, indent=4)
-                st.success(f"Processing complete for Chunk {chunk_idx+1}. Results saved to response.json.")
+                # Update processed chunks count
+                st.session_state.processed_chunks += 1
 
                 # Display results for each element
                 st.markdown(f"#### Results for Chunk {chunk_idx+1}:")
