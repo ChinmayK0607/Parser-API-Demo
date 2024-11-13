@@ -34,18 +34,28 @@ ENTITIES_COLORS = {
 }
 BOX_PADDING = 2
 
-# Function to load YOLO model
+
+# Define YOLO model path and download link
 MODEL_PATH = "models/yolov10x_best.pt"
-DETECTION_MODEL = None
+FILE_ID = "1jTF4xd0Pu7FDFpLTfSGjgTTolZju4_j7"  # Replace with your actual file ID
+MODEL_URL = f"https://drive.google.com/uc?id={FILE_ID}"
 
+@st.cache_resource
 def load_model():
-    global DETECTION_MODEL
-    if DETECTION_MODEL is None:
-        DETECTION_MODEL = YOLO(MODEL_PATH)
-    return DETECTION_MODEL
+    if not os.path.exists(MODEL_PATH):
+        st.info("Downloading YOLO model from Google Drive...")
+        os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
+        try:
+            # Download the file using gdown
+            gdown.download(MODEL_URL, MODEL_PATH, quiet=False)
+            st.success("YOLO model downloaded successfully!")
+        except Exception as e:
+            st.error(f"Error downloading the model: {e}")
+            st.stop()
+    return YOLO(MODEL_PATH)
 
-# Load the model at startup
-load_model()
+DETECTION_MODEL = load_model()
+
 
 def draw_box_and_label(image, start_box, end_box, cls, detection_class_conf):
     """
