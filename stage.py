@@ -10,6 +10,10 @@ import time
 import logging
 import pytesseract
 import gdown
+
+# Import TableExtractor
+from table_module import TableExtractor  # Ensure the class is saved in table_module.py
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s:%(message)s')
 
@@ -52,7 +56,11 @@ def load_model():
             st.stop()
     return YOLO(MODEL_PATH)
 
+# Load the model at startup
 DETECTION_MODEL = load_model()
+
+# Initialize TableExtractor at startup
+table_extractor = TableExtractor()
 
 def draw_box_and_label(image, start_box, end_box, cls, detection_class_conf):
     """
@@ -264,7 +272,7 @@ def process_chunk(image, chunk):
 
     for element in chunk['elements']:
         if element['class'] == 'Table':
-            # Process as a table with TableExtractor (if available)
+            # Process as a table with TableExtractor
             result = process_element_with_table_extraction(image, element)
         elif element['class'] == 'Picture':
             # For pictures, just extract and display the image
@@ -325,10 +333,8 @@ def process_element_with_table_extraction(image, element):
     """
     try:
         cropped_image = crop_and_encode_image(image, element)
-        # Replace the following line with actual TableExtractor code if available
-        markdown_table = "Extracted table data (placeholder)"
-        # If you have TableExtractor, use:
-        # markdown_table = table_extractor.extract_markdown(cropped_image)
+        # Use table_extractor to extract markdown table
+        markdown_table = table_extractor.extract_markdown(cropped_image)
     except Exception as e:
         markdown_table = f"Error processing table: {str(e)}"
         logging.error(f"Error processing table: {str(e)}")
@@ -440,8 +446,8 @@ def main():
                     else:
                         st.write("No image available.")
                 elif cls == 'Table':
-                    # Display the extracted table (markdown or placeholder)
-                    st.write(element['result'])
+                    # Display the extracted table (markdown)
+                    st.markdown(element['result'])
                 else:
                     # Display the extracted text
                     st.write(element['result'])
