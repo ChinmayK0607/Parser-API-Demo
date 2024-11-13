@@ -1,3 +1,5 @@
+# streamlit_app.py
+
 import streamlit as st
 import cv2
 from ultralytics import YOLO
@@ -14,7 +16,6 @@ import pytesseract
 from table_module import TableExtractor  # Ensure this is defined in table_module.py
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
-from tqdm.auto import tqdm
 
 # Set page config at the very beginning
 st.set_page_config(page_title="📄 Document Element Classification and Extraction", layout="wide")
@@ -366,89 +367,6 @@ def process_elements(image, elements):
     results.sort(key=lambda x: x["index"])
     return results
 
-def intelligent_chunking(detected_elements, hierarchy, max_chunk_size=5):
-    """
-    Group detected elements into chunks based on the given hierarchy.
-    """
-    chunks = []
-    current_chunk_elements = []
-    content_hashes = set()
-
-    def hash_content(element):
-        # Create a hash of the element's content to check for duplicates
-        # Since we don't have the content yet, we'll use coordinates and class
-        content = f"{element['class']}_{element['coordinates']}"
-        return hashlib.md5(content.encode()).hexdigest()
-
-    for idx, element in enumerate(detected_elements):
-        element_type = element['class']
-        element_priority = hierarchy.index(element_type) if element_type in hierarchy else len(hierarchy)
-        element_hash = hash_content(element)
-
-        # Adjust breaking condition: Only break on high-priority elements
-        if element_type == 'Section-header':
-            # Start a new chunk
-            if current_chunk_elements:
-                chunks.append({'elements': current_chunk_elements})
-            current_chunk_elements = [element]
-            content_hashes = {element_hash}
-        else:
-            # Add element to current chunk
-            if element_hash not in content_hashes:
-                current_chunk_elements.append(element)
-                content_hashes.add(element_hash)
-
-            # Check if current chunk exceeds max size
-            if len(current_chunk_elements) >= max_chunk_size:
-                chunks.append({'elements': current_chunk_elements})
-                current_chunk_elements = []
-                content_hashes = set()
-
-    # Add the last chunk if it's not empty
-    if current_chunk_elements:
-        chunks.append({'elements': current_chunk_elements})
-
-    # Optional: Merge small chunks with adjacent ones
-    merged_chunks = []
-    previous_chunk = None
-    for chunk in chunks:
-        chunk_elements = chunk['elements']
-        if previous_chunk and len(previous_chunk['elements']) + len(chunk_elements) <= max_chunk_size:
-            previous_chunk['elements'].extend(chunk_elements)
-        else:
-            if previous_chunk:
-                merged_chunks.append(previous_chunk)
-            previous_chunk = {'elements': chunk_elements}
-    if previous_chunk:
-        merged_chunks.append(previous_chunk)
-
-    return merged_chunks
-
-def combine_elements_into_image(image, elements):
-    """
-    Combine the regions of elements into a single image, and adjust element coordinates.
-    """
-    # Determine the bounding box that encompasses all elements in the chunk
-    x_start = min(element["coordinates"]["start"][0] for element in elements)
-    y_start = min(element["coordinates"]["start"][1] for element in elements)
-    x_end = max(element["coordinates"]["end"][0] for element in elements)
-    y_end = max(element["coordinates"]["end"][1] for element in elements)
-
-    # Crop the image to the bounding box
-    combined_image = image.crop((x_start, y_start, x_end, y_end))
-
-    # Adjust the coordinates of the elements
-    adjusted_elements = []
-    for element in elements:
-        adjusted_element = element.copy()
-        adjusted_element['coordinates'] = {
-            'start': (element['coordinates']['start'][0] - x_start, element['coordinates']['start'][1] - y_start),
-            'end': (element['coordinates']['end'][0] - x_start, element['coordinates']['end'][1] - y_start)
-        }
-        adjusted_elements.append(adjusted_element)
-
-    return combined_image, adjusted_elements
-
 def main():
     st.title("📄 Document Element Classification and Extraction")
 
@@ -513,10 +431,11 @@ def main():
         else:
             images_with_info = st.session_state.images_with_info
 
+        # Iterate through each image/page
         for idx, (image, page_numbers, page_boundary) in enumerate(images_with_info):
-            st.header(f"Processing Pages {page_numbers}")
+            st.header(f"📄 Processing Pages {page_numbers}")
 
-            # Create two columns for annotated image and responses
+            # Create two columns for annotated image and extraction results
             col1, col2 = st.columns([1, 2])
 
             with col1:
@@ -526,62 +445,95 @@ def main():
             with col2:
                 st.subheader("Detected Elements and Extraction")
                 detect_button_key = f"detect_{idx}"
-                if st.button(f"🔍 Detect Elements for Pages {page_numbers}", key=detect_button_key):
-                    with st.spinner(f"Processing Pages {page_numbers}..."):
-                        result_image, detected_elements = detect(image, page_numbers, page_boundary)
-                        # Update the annotated image in col1
-                        col1.image(result_image, caption=f"✅ Detected Elements in Pages {page_numbers}", use_column_width=True)
+                processing_key = f"processing_{idx}"
+                results_key = f"results_{idx}"
 
-                        if detected_elements:
-                            st.write(f"Detected {len(detected_elements)} element(s) in Pages {page_numbers}. Processing...")
+                # Initialize processing flags if not present
+                if processing_key not in st.session_state:
+                    st.session_state[processing_key] = False
 
-                            # Store detected elements
+                if results_key not in st.session_state:
+                    st.session_state[results_key] = None
+
+                # If not processing and no results, start processing
+                if not st.session_state[processing_key] and st.session_state[results_key] is None:
+                    # Submit detection task
+                    future = executor.submit(detect, image, page_numbers, page_boundary)
+                    st.session_state[processing_key] = True
+
+                    # Function to handle detection result
+                    def handle_detection(fut, idx):
+                        try:
+                            result_image, detected_elements = fut.result()
                             st.session_state.detected_elements[idx] = detected_elements
+                            st.session_state.results_key = st.session_state.results_key or {}
+                            st.session_state.results_key = st.session_state.results_key or {}
+                            st.session_state.results_key = st.session_state.results_key.copy()
+                            st.session_state.results_key = st.session_state.results_key.copy()
+                            st.session_state.results_key = st.session_state.results_key.copy()
+                            st.session_state.results_key = st.session_state.results_key.copy()
+                            st.session_state.results_key = st.session_state.results_key.copy()
+                            st.session_state.results_key = st.session_state.results_key.copy()
+                            # Update annotated image
+                            with col1:
+                                st.image(result_image, caption=f"✅ Detected Elements in Pages {page_numbers}", use_column_width=True)
+                            # Process elements
+                            if detected_elements:
+                                # Submit extraction task
+                                extraction_future = executor.submit(process_elements, image, detected_elements)
+                                # Handle extraction result
+                                def handle_extraction(fut_extraction, idx):
+                                    try:
+                                        chunk_results = fut_extraction.result()
+                                        st.session_state.all_results[idx] = chunk_results
+                                        # Save results to response.json
+                                        try:
+                                            with open("response.json", "w") as f:
+                                                json.dump(st.session_state.all_results, f, indent=4)
+                                            st.success("Processing complete. Results saved to response.json.")
+                                        except Exception as e:
+                                            st.error(f"Error writing response file: {e}")
 
-                            # Submit processing to the ThreadPoolExecutor
-                            future = executor.submit(process_elements, image, detected_elements)
+                                        # Display extraction results
+                                        st.markdown(f"#### Extracted Information for Pages {page_numbers}:")
+                                        for result in chunk_results:
+                                            st.markdown(f"**Element {result['index']} ({result['class']}):**")
+                                            if result['class'] == "Table":
+                                                st.markdown("**Extracted Table (Markdown):**")
+                                                st.markdown(result.get('markdown', ''))
+                                            elif result['class'] in ["Text", "Section-header", "Title", "Caption", "Footnote", "Page-header", "Page-footer", "List-item"]:
+                                                st.markdown("**Extracted Text:**")
+                                                st.write(result.get('result', ''))
+                                            elif result['class'] == "Picture":
+                                                st.markdown("**Picture:**")
+                                                st.image(result.get('image_data', ''), use_column_width=True)
+                                            else:
+                                                st.markdown("**Extracted Content:**")
+                                                st.write(result.get('result', ''))
+                                    except Exception as e:
+                                        st.error(f"Error during extraction: {e}")
+                                    finally:
+                                        st.session_state[processing_key] = False
 
-                            # Asynchronously display results as they complete
-                            with st.spinner("Extracting information from detected elements..."):
-                                try:
-                                    chunk_results = future.result(timeout=300)  # Set timeout as needed
-                                except Exception as e:
-                                    st.error(f"Error during processing: {e}")
-                                    continue
+                                extraction_future.add_done_callback(lambda fut_extraction: handle_extraction(fut_extraction, idx))
+                            else:
+                                st.write(f"No elements detected in Pages {page_numbers}.")
+                                st.session_state[processing_key] = False
+                        except Exception as e:
+                            st.error(f"Error during detection: {e}")
+                            st.session_state[processing_key] = False
 
-                            # Store the results
-                            st.session_state.all_results[idx] = chunk_results
+                    # Add done callback
+                    future.add_done_callback(lambda fut: handle_detection(fut, idx))
 
-                            # Save all results to response.json
-                            try:
-                                with open("response.json", "w") as f:
-                                    json.dump(st.session_state.all_results, f, indent=4)
-                                st.success("Processing complete. Results saved to response.json.")
-                            except Exception as e:
-                                st.error(f"Error writing response file: {e}")
+                # If processing, show a spinner
+                if st.session_state[processing_key]:
+                    st.spinner("Detecting elements and extracting information...")
 
-                            # Display results for each element
-                            st.markdown(f"#### Extracted Information for Pages {page_numbers}:")
-                            for result in chunk_results:
-                                st.markdown(f"**Element {result['index']} ({result['class']}):**")
-                                if result['class'] == "Table":
-                                    st.markdown("**Extracted Table (Markdown):**")
-                                    st.markdown(result.get('markdown', ''))
-                                elif result['class'] in ["Text", "Section-header", "Title", "Caption", "Footnote", "Page-header", "Page-footer", "List-item"]:
-                                    st.markdown("**Extracted Text:**")
-                                    st.write(result.get('result', ''))
-                                elif result['class'] == "Picture":
-                                    st.markdown("**Picture:**")
-                                    st.image(result.get('image_data', ''), use_column_width=True)
-                                else:
-                                    st.markdown("**Extracted Content:**")
-                                    st.write(result.get('result', ''))
-                        else:
-                            st.write(f"No elements detected in Pages {page_numbers}.")
-                else:
-                    # Check if detected elements and results are in session state
-                    if idx in st.session_state.all_results:
-                        chunk_results = st.session_state.all_results[idx]
+                # If results are available, display them
+                if st.session_state[results_key]:
+                    chunk_results = st.session_state.all_results.get(idx, [])
+                    if chunk_results:
                         st.markdown(f"#### Extracted Information for Pages {page_numbers}:")
                         for result in chunk_results:
                             st.markdown(f"**Element {result['index']} ({result['class']}):**")
@@ -597,8 +549,6 @@ def main():
                             else:
                                 st.markdown("**Extracted Content:**")
                                 st.write(result.get('result', ''))
-                    else:
-                        st.info("Click the button above to detect elements and extract information.")
 
 if __name__ == "__main__":
     main()
