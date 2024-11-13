@@ -9,7 +9,6 @@ import hashlib  # For content hashing
 import time
 import logging
 import pytesseract
-import asyncio
 import gdown
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s:%(message)s')
@@ -34,7 +33,6 @@ ENTITIES_COLORS = {
 }
 BOX_PADDING = 2
 
-
 # Define YOLO model path and download link
 MODEL_PATH = "models/yolov10x_best.pt"
 FILE_ID = "1jTF4xd0Pu7FDFpLTfSGjgTTolZju4_j7"  # Replace with your actual file ID
@@ -55,7 +53,6 @@ def load_model():
     return YOLO(MODEL_PATH)
 
 DETECTION_MODEL = load_model()
-
 
 def draw_box_and_label(image, start_box, end_box, cls, detection_class_conf):
     """
@@ -259,31 +256,23 @@ def crop_and_encode_image(image, element_region):
 
     return element_image  # Return PIL Image object
 
-async def process_chunk(image, chunk):
+def process_chunk(image, chunk):
     """
     Process a single chunk of detected elements.
     """
     results = []
 
-    tasks = []
     for element in chunk['elements']:
         if element['class'] == 'Table':
             # Process as a table with TableExtractor (if available)
-            task = asyncio.create_task(process_element_with_table_extraction(image, element))
-            tasks.append(task)
+            result = process_element_with_table_extraction(image, element)
         elif element['class'] == 'Picture':
             # For pictures, just extract and display the image
-            task = asyncio.create_task(process_element_with_image(image, element))
-            tasks.append(task)
+            result = process_element_with_image(image, element)
         else:
             # Process with pytesseract OCR
-            task = asyncio.create_task(process_element_with_ocr(image, element))
-            tasks.append(task)
-
-    # Wait for all tasks to complete
-    elements_results = await asyncio.gather(*tasks)
-
-    results.extend(elements_results)
+            result = process_element_with_ocr(image, element)
+        results.append(result)
 
     # Aggregate results for the chunk
     return {
@@ -291,7 +280,7 @@ async def process_chunk(image, chunk):
         "elements": results
     }
 
-async def process_element_with_image(image, element):
+def process_element_with_image(image, element):
     """
     Process an element by extracting and returning the image.
     """
@@ -310,7 +299,7 @@ async def process_element_with_image(image, element):
 
     return result
 
-async def process_element_with_ocr(image, element):
+def process_element_with_ocr(image, element):
     """
     Process an element using pytesseract OCR.
     """
@@ -330,7 +319,7 @@ async def process_element_with_ocr(image, element):
 
     return result
 
-async def process_element_with_table_extraction(image, element):
+def process_element_with_table_extraction(image, element):
     """
     Process an element as a table using TableExtractor.
     """
@@ -429,9 +418,11 @@ def main():
                 # Apply the chunking algorithm
                 chunks = intelligent_chunking(detected_elements, max_chunk_size=5)
 
-                # Process chunks asynchronously
-                tasks = [process_chunk(image, chunk) for chunk in chunks]
-                chunk_results = asyncio.run(asyncio.gather(*tasks))
+                # Process chunks sequentially
+                chunk_results = []
+                for chunk in chunks:
+                    result = process_chunk(image, chunk)
+                    chunk_results.append(result)
                 all_results.extend(chunk_results)
             else:
                 st.write(f"No detected elements in image {idx+1}.")
