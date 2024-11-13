@@ -9,12 +9,11 @@ import io
 import base64
 import json
 import fitz  # PyMuPDF for PDF handling
-import hashlib  # For content hashing
 import os
 import gdown
 import pytesseract
 from table_module import TableExtractor  # Ensure this is defined in table_module.py
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 import logging
 
 # Set page config at the very beginning
@@ -220,27 +219,20 @@ def detect(image, page_numbers=None, page_boundary=None):
 
 def process_pdf(pdf_document):
     """
-    Process a PDF document and return a list of combined images from two pages.
+    Process a PDF document and return a list of images (processed as pairs).
     """
     images = []
     
     total_pages = len(pdf_document)
     
-    if PROCESS_ALL_PAGES:
-        pages_to_process = range(0, total_pages, 2)  # Process two pages at a time
-    else:
-        # Ensure PAGE_TO_PROCESS is within the valid range
-        if PAGE_TO_PROCESS < 0 or PAGE_TO_PROCESS >= total_pages:
-            st.error(f"PAGE_TO_PROCESS {PAGE_TO_PROCESS} is out of range. PDF has {total_pages} pages.")
-            return images
-        pages_to_process = [PAGE_TO_PROCESS]
+    # Process all pages in pairs
+    pages_to_process = range(0, total_pages, 2)
     
     for i in pages_to_process:
         # Load first page
         page1 = pdf_document.load_page(i)
         pix1 = page1.get_pixmap(matrix=fitz.Matrix(2, 2))  # Increase resolution
         img1 = Image.frombytes("RGB", [pix1.width, pix1.height], pix1.samples)
-        height1 = pix1.height  # Height of the first page image
         
         if i+1 < total_pages:
             # Load second page
@@ -258,7 +250,7 @@ def process_pdf(pdf_document):
             images.append((combined_image, [i, i+1], img1.height))  # Include page numbers and boundary
         else:
             images.append((img1, [i], img1.height))
-
+    
     return images
 
 def crop_image(image, element_region):
@@ -422,20 +414,19 @@ def main():
         if st.button("🚀 Process All Documents"):
             with st.spinner("Processing documents..."):
                 # Initialize placeholders for annotated images and results
-                annotated_placeholders = []
-                results_placeholders = []
+                annotated_col, results_col = st.columns([1, 2])
 
-                cols = st.columns(len(images_with_info))
+                # Prepare placeholders
+                annotated_placeholders = [annotated_col.empty() for _ in images_with_info]
+                with results_col:
+                    results_section = st.container()
 
-                for idx in range(len(images_with_info)):
-                    annotated_placeholders.append(cols[idx].empty())
-                results_section = st.container()
-
-                # Submit detection and extraction tasks
+                # Submit detection tasks
                 futures = {}
                 for idx, (image, page_numbers, page_boundary) in enumerate(images_with_info):
                     futures[idx] = executor.submit(detect, image, page_numbers, page_boundary)
 
+                # As each detection completes, process the results
                 for idx, future in futures.items():
                     try:
                         result_image, detected_elements = future.result()
@@ -460,24 +451,24 @@ def main():
 
                             # Display extraction results
                             with results_section:
-                                st.markdown(f"### Extracted Information for Pages {images_with_info[idx][1]}:")
+                                results_section.markdown(f"### Extracted Information for Pages {images_with_info[idx][1]}:")
                                 for result in extraction_results:
-                                    st.markdown(f"**Element {result['index']} ({result['class']}):**")
+                                    results_section.markdown(f"**Element {result['index']} ({result['class']}):**")
                                     if result['class'] == "Table":
-                                        st.markdown("**Extracted Table (Markdown):**")
-                                        st.markdown(result.get('markdown', ''))
+                                        results_section.markdown("**Extracted Table (Markdown):**")
+                                        results_section.markdown(result.get('markdown', ''))
                                     elif result['class'] in ["Text", "Section-header", "Title", "Caption", "Footnote", "Page-header", "Page-footer", "List-item"]:
-                                        st.markdown("**Extracted Text:**")
-                                        st.write(result.get('result', ''))
+                                        results_section.markdown("**Extracted Text:**")
+                                        results_section.write(result.get('result', ''))
                                     elif result['class'] == "Picture":
-                                        st.markdown("**Picture:**")
-                                        st.image(result.get('image_data', ''), use_column_width=True)
+                                        results_section.markdown("**Picture:**")
+                                        results_section.image(result.get('image_data', ''), use_column_width=True)
                                     else:
-                                        st.markdown("**Extracted Content:**")
-                                        st.write(result.get('result', ''))
+                                        results_section.markdown("**Extracted Content:**")
+                                        results_section.write(result.get('result', ''))
                         else:
                             st.warning(f"No elements detected in Pages {images_with_info[idx][1]}.")
-
+    
                     except Exception as e:
                         st.error(f"Error processing Pages {images_with_info[idx][1]}: {e}")
 
