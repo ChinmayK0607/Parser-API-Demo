@@ -40,26 +40,6 @@ ENTITIES_COLORS = {
 }
 BOX_PADDING = 2
 
-# Define the hierarchy for chunking (not used anymore but kept for potential future use)
-SEGMENT_HIERARCHY = [
-    "Section-header",
-    "Title",
-    "Page-header",
-    "Page-footer",
-    "Table",
-    "Picture",
-    "Caption",
-    "Formula",
-    "Text",
-    "List-item",
-    "Footnote",
-    "Unknown"
-]
-
-# Flag to control processing of all pages or a single page
-PROCESS_ALL_PAGES = True  # Set to True to process all pages, False to process a single page
-PAGE_TO_PROCESS = 2       # Specify the page index to process when PROCESS_ALL_PAGES is False (0-based)
-
 # Initialize session state variables
 if 'uploaded_files_contents' not in st.session_state:
     st.session_state.uploaded_files_contents = None
@@ -431,124 +411,78 @@ def main():
         else:
             images_with_info = st.session_state.images_with_info
 
-        # Iterate through each image/page
-        for idx, (image, page_numbers, page_boundary) in enumerate(images_with_info):
-            st.header(f"📄 Processing Pages {page_numbers}")
+        # Display uploaded images immediately
+        st.subheader("📁 Uploaded Documents")
+        uploaded_images_placeholder = st.container()
+        with uploaded_images_placeholder:
+            for idx, (image, page_numbers, page_boundary) in enumerate(images_with_info):
+                st.image(image, caption=f"📄 Pages {page_numbers}", use_column_width=True)
 
-            # Create two columns for annotated image and extraction results
-            col1, col2 = st.columns([1, 2])
+        # "Process" button
+        if st.button("🚀 Process All Documents"):
+            with st.spinner("Processing documents..."):
+                # Initialize placeholders for annotated images and results
+                annotated_placeholders = []
+                results_placeholders = []
 
-            with col1:
-                st.subheader("Annotated Image")
-                st.image(image, caption=f"📥 Uploaded Pages {page_numbers}", use_column_width=True)
+                cols = st.columns(len(images_with_info))
 
-            with col2:
-                st.subheader("Detected Elements and Extraction")
-                detect_button_key = f"detect_{idx}"
-                processing_key = f"processing_{idx}"
-                results_key = f"results_{idx}"
+                for idx in range(len(images_with_info)):
+                    annotated_placeholders.append(cols[idx].empty())
+                results_section = st.container()
 
-                # Initialize processing flags if not present
-                if processing_key not in st.session_state:
-                    st.session_state[processing_key] = False
+                # Submit detection and extraction tasks
+                futures = {}
+                for idx, (image, page_numbers, page_boundary) in enumerate(images_with_info):
+                    futures[idx] = executor.submit(detect, image, page_numbers, page_boundary)
 
-                if results_key not in st.session_state:
-                    st.session_state[results_key] = None
+                for idx, future in futures.items():
+                    try:
+                        result_image, detected_elements = future.result()
+                        st.session_state.detected_elements[idx] = detected_elements
 
-                # If not processing and no results, start processing
-                if not st.session_state[processing_key] and st.session_state[results_key] is None:
-                    # Submit detection task
-                    future = executor.submit(detect, image, page_numbers, page_boundary)
-                    st.session_state[processing_key] = True
+                        # Update annotated image
+                        annotated_placeholders[idx].image(result_image, caption=f"✅ Annotated Pages {images_with_info[idx][1]}", use_column_width=True)
 
-                    # Function to handle detection result
-                    def handle_detection(fut, idx):
-                        try:
-                            result_image, detected_elements = fut.result()
-                            st.session_state.detected_elements[idx] = detected_elements
-                            st.session_state.results_key = st.session_state.results_key or {}
-                            st.session_state.results_key = st.session_state.results_key or {}
-                            st.session_state.results_key = st.session_state.results_key.copy()
-                            st.session_state.results_key = st.session_state.results_key.copy()
-                            st.session_state.results_key = st.session_state.results_key.copy()
-                            st.session_state.results_key = st.session_state.results_key.copy()
-                            st.session_state.results_key = st.session_state.results_key.copy()
-                            st.session_state.results_key = st.session_state.results_key.copy()
-                            # Update annotated image
-                            with col1:
-                                st.image(result_image, caption=f"✅ Detected Elements in Pages {page_numbers}", use_column_width=True)
-                            # Process elements
-                            if detected_elements:
-                                # Submit extraction task
-                                extraction_future = executor.submit(process_elements, image, detected_elements)
-                                # Handle extraction result
-                                def handle_extraction(fut_extraction, idx):
-                                    try:
-                                        chunk_results = fut_extraction.result()
-                                        st.session_state.all_results[idx] = chunk_results
-                                        # Save results to response.json
-                                        try:
-                                            with open("response.json", "w") as f:
-                                                json.dump(st.session_state.all_results, f, indent=4)
-                                            st.success("Processing complete. Results saved to response.json.")
-                                        except Exception as e:
-                                            st.error(f"Error writing response file: {e}")
+                        if detected_elements:
+                            # Submit extraction task
+                            extraction_future = executor.submit(process_elements, images_with_info[idx][0], detected_elements)
+                            extraction_results = extraction_future.result()
+                            st.session_state.all_results[idx] = extraction_results
 
-                                        # Display extraction results
-                                        st.markdown(f"#### Extracted Information for Pages {page_numbers}:")
-                                        for result in chunk_results:
-                                            st.markdown(f"**Element {result['index']} ({result['class']}):**")
-                                            if result['class'] == "Table":
-                                                st.markdown("**Extracted Table (Markdown):**")
-                                                st.markdown(result.get('markdown', ''))
-                                            elif result['class'] in ["Text", "Section-header", "Title", "Caption", "Footnote", "Page-header", "Page-footer", "List-item"]:
-                                                st.markdown("**Extracted Text:**")
-                                                st.write(result.get('result', ''))
-                                            elif result['class'] == "Picture":
-                                                st.markdown("**Picture:**")
-                                                st.image(result.get('image_data', ''), use_column_width=True)
-                                            else:
-                                                st.markdown("**Extracted Content:**")
-                                                st.write(result.get('result', ''))
-                                    except Exception as e:
-                                        st.error(f"Error during extraction: {e}")
-                                    finally:
-                                        st.session_state[processing_key] = False
+                            # Save results to response.json
+                            try:
+                                with open("response.json", "w") as f:
+                                    json.dump(st.session_state.all_results, f, indent=4)
+                                st.success("Processing complete. Results saved to response.json.")
+                            except Exception as e:
+                                st.error(f"Error writing response file: {e}")
 
-                                extraction_future.add_done_callback(lambda fut_extraction: handle_extraction(fut_extraction, idx))
-                            else:
-                                st.write(f"No elements detected in Pages {page_numbers}.")
-                                st.session_state[processing_key] = False
-                        except Exception as e:
-                            st.error(f"Error during detection: {e}")
-                            st.session_state[processing_key] = False
+                            # Display extraction results
+                            with results_section:
+                                st.markdown(f"### Extracted Information for Pages {images_with_info[idx][1]}:")
+                                for result in extraction_results:
+                                    st.markdown(f"**Element {result['index']} ({result['class']}):**")
+                                    if result['class'] == "Table":
+                                        st.markdown("**Extracted Table (Markdown):**")
+                                        st.markdown(result.get('markdown', ''))
+                                    elif result['class'] in ["Text", "Section-header", "Title", "Caption", "Footnote", "Page-header", "Page-footer", "List-item"]:
+                                        st.markdown("**Extracted Text:**")
+                                        st.write(result.get('result', ''))
+                                    elif result['class'] == "Picture":
+                                        st.markdown("**Picture:**")
+                                        st.image(result.get('image_data', ''), use_column_width=True)
+                                    else:
+                                        st.markdown("**Extracted Content:**")
+                                        st.write(result.get('result', ''))
+                        else:
+                            st.warning(f"No elements detected in Pages {images_with_info[idx][1]}.")
 
-                    # Add done callback
-                    future.add_done_callback(lambda fut: handle_detection(fut, idx))
+                    except Exception as e:
+                        st.error(f"Error processing Pages {images_with_info[idx][1]}: {e}")
 
-                # If processing, show a spinner
-                if st.session_state[processing_key]:
-                    st.spinner("Detecting elements and extracting information...")
-
-                # If results are available, display them
-                if st.session_state[results_key]:
-                    chunk_results = st.session_state.all_results.get(idx, [])
-                    if chunk_results:
-                        st.markdown(f"#### Extracted Information for Pages {page_numbers}:")
-                        for result in chunk_results:
-                            st.markdown(f"**Element {result['index']} ({result['class']}):**")
-                            if result['class'] == "Table":
-                                st.markdown("**Extracted Table (Markdown):**")
-                                st.markdown(result.get('markdown', ''))
-                            elif result['class'] in ["Text", "Section-header", "Title", "Caption", "Footnote", "Page-header", "Page-footer", "List-item"]:
-                                st.markdown("**Extracted Text:**")
-                                st.write(result.get('result', ''))
-                            elif result['class'] == "Picture":
-                                st.markdown("**Picture:**")
-                                st.image(result.get('image_data', ''), use_column_width=True)
-                            else:
-                                st.markdown("**Extracted Content:**")
-                                st.write(result.get('result', ''))
+        else:
+            st.info("Click the 'Process All Documents' button to start processing.")
 
 if __name__ == "__main__":
     main()
