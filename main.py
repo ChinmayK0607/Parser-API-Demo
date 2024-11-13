@@ -5,14 +5,21 @@ import numpy as np
 from PIL import Image
 import io
 import base64
-from openai import OpenAI
 import json
 import fitz  # PyMuPDF for PDF handling
 import hashlib  # For content hashing
 import os
 import gdown
+import pytesseract
+from table_module import TableExtractor  # Ensure this is defined in table_module.py
+from concurrent.futures import ThreadPoolExecutor
+import logging
+
 # Set page config at the very beginning
 st.set_page_config(page_title="Document Element Classification", layout="wide")
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s:%(message)s')
 
 # Define constants with more subtle colors
 ENTITIES_COLORS = {
@@ -51,15 +58,32 @@ SEGMENT_HIERARCHY = [
 PROCESS_ALL_PAGES = True  # Set to True to process all pages, False to process a single page
 PAGE_TO_PROCESS = 2       # Specify the page index to process when PROCESS_ALL_PAGES is False (0-based)
 
-# Initialize OpenAI API key in session state
-if 'openai_api_key' not in st.session_state:
-    st.session_state.openai_api_key = ""
+# Initialize session state variables
+if 'uploaded_files_contents' not in st.session_state:
+    st.session_state.uploaded_files_contents = None
 
-# Function to load YOLO model with caching to improve performance
+if 'images_with_info' not in st.session_state:
+    st.session_state.images_with_info = []
+
+if 'detected_elements' not in st.session_state:
+    st.session_state.detected_elements = {}
+
+if 'chunks' not in st.session_state:
+    st.session_state.chunks = {}
+
+if 'all_results' not in st.session_state:
+    st.session_state.all_results = {}
+
+# Initialize TableExtractor
+table_extractor = TableExtractor()
+
+# Initialize ThreadPoolExecutor for batch processing
+executor = ThreadPoolExecutor(max_workers=4)
+
+# Define YOLO model path and download link
 MODEL_PATH = "models/yolov10x_best.pt"
-FILE_ID = "1jTF4xd0Pu7FDFpLTfSGjgTTolZju4_j7"  # Extracted from your shareable link
+FILE_ID = "1jTF4xd0Pu7FDFpLTfSGjgTTolZju4_j7"  # Replace with your actual file ID
 MODEL_URL = f"https://drive.google.com/uc?id={FILE_ID}"
-
 
 @st.cache_resource
 def load_model():
@@ -69,6 +93,7 @@ def load_model():
         try:
             # Download the file using gdown
             gdown.download(MODEL_URL, MODEL_PATH, quiet=False)
+            st.success("YOLO model downloaded successfully!")
         except Exception as e:
             st.error(f"Error downloading the model: {e}")
             st.stop()
@@ -117,6 +142,24 @@ def draw_box_and_label(image, start_box, end_box, cls, detection_class_conf):
         thickness=font_thickness
     )
 
+def calculate_iou(box1, box2):
+    """
+    Calculate the Intersection over Union (IoU) of two bounding boxes.
+    """
+    x1 = max(box1['start'][0], box2['start'][0])
+    y1 = max(box1['start'][1], box2['start'][1])
+    x2 = min(box1['end'][0], box2['end'][0])
+    y2 = min(box1['end'][1], box2['end'][1])
+
+    intersection = max(0, x2 - x1) * max(0, y2 - y1)
+    area1 = (box1['end'][0] - box1['start'][0]) * (box1['end'][1] - box1['start'][1])
+    area2 = (box2['end'][0] - box2['start'][0]) * (box2['end'][1] - box2['start'][1])
+
+    if area1 + area2 - intersection == 0:
+        return 0
+    iou = intersection / float(area1 + area2 - intersection)
+    return iou
+
 def merge_nearby_detections(detections, iou_threshold=0.5):
     """
     Merge nearby detections to reduce duplicates.
@@ -136,24 +179,6 @@ def merge_nearby_detections(detections, iou_threshold=0.5):
                 i += 1
     
     return merged
-
-def calculate_iou(box1, box2):
-    """
-    Calculate the Intersection over Union (IoU) of two bounding boxes.
-    """
-    x1 = max(box1['start'][0], box2['start'][0])
-    y1 = max(box1['start'][1], box2['start'][1])
-    x2 = min(box1['end'][0], box2['end'][0])
-    y2 = min(box1['end'][1], box2['end'][1])
-
-    intersection = max(0, x2 - x1) * max(0, y2 - y1)
-    area1 = (box1['end'][0] - box1['start'][0]) * (box1['end'][1] - box1['start'][1])
-    area2 = (box2['end'][0] - box2['start'][0]) * (box2['end'][1] - box2['start'][1])
-    
-    if area1 + area2 - intersection == 0:
-        return 0
-    iou = intersection / float(area1 + area2 - intersection)
-    return iou
 
 def detect(image, page_numbers=None, page_boundary=None):
     """
@@ -257,131 +282,103 @@ def process_pdf(pdf_document):
 
     return images
 
-def crop_and_encode_image(image, element_region):
+def crop_image(image, element_region):
     """
-    Crop the image to the element region and encode it as base64.
+    Crop the image to the element region.
     """
-    element_image = image.crop((
-        element_region["coordinates"]["start"][0],
-        element_region["coordinates"]["start"][1],
-        element_region["coordinates"]["end"][0],
-        element_region["coordinates"]["end"][1]
-    ))
+    padding = 5  # 5 pixels padding
+    x_start = max(element_region["start"][0] - padding, 0)
+    y_start = max(element_region["start"][1] - padding, 0)
+    x_end = min(element_region["end"][0] + padding, image.width)
+    y_end = min(element_region["end"][1] + padding, image.height)
 
-    # Maintain aspect ratio while resizing
-    max_size = (800, 800)  # Reduced size to manage memory usage
-    element_image.thumbnail(max_size, Image.LANCZOS)
+    element_image = image.crop((x_start, y_start, x_end, y_end))
 
-    buffered = io.BytesIO()
-    element_image.save(buffered, format="PNG")
-    img_str = base64.b64encode(buffered.getvalue()).decode()
+    return element_image  # Return PIL Image object
 
-    return img_str
-
-def process_elements(image, elements, openai_api_key):
+def process_elements(image, elements):
     """
-    Process each detected element individually.
+    Process each detected element individually using OCR or table extraction.
     """
     results = []
-
-    prompts = {
-        "Text": "Extract the text from the provided image.",
-        "Section-header": "Extract the text from the provided image.",
-        "Title": "Extract the text from the provided image.",
-        "Caption": "Extract the text from the provided image.",
-        "Footnote": "Extract the text from the provided image.",
-        "Page-header": "Extract the text from the provided image.",
-        "Page-footer": "Extract the text from the provided image.",
-        "List-item": "Extract the text from the provided image.",
-        "Table": "Generate the HTML code for the table in the provided image and provide a summary of the data in the table. The HTML should be semantically correct and use appropriate tags like <table>, <tr>, <th>, and <td>. Please output the results separated by '---'. First provide the HTML code, then a summary of the data.",
-        "Picture": "Provide a detailed description of the provided image. Extract any text/tables present in the image and give its html or markdown format, whichever is more suitable for you.Make sure that you explain in detail any trend that you see in the picture.",
-        "Formula": "Simplify the mathematical formula shown in the provided image. Give its latex formula if possible.",
-        "Unknown": "Describe the content of the provided image."
-    }
-
-    # Initialize OpenAI client with the provided API key
-    KEY = openai_api_key
-    client = OpenAI(api_key=KEY)
     for element in elements:
         cls = element["class"]
-        prompt = prompts.get(cls, "Describe the content of the provided image.")
-        auxiliary_prompt = "IN CASE YOU CANNOT DETECT OR HELP WITH THE EXTRACTION, ADD AN <UNK> TOKEN SIMPLY. NOTHING ELSE. Do not add placeholder or introductory or explainatory text like <sure heres your text> or <the text in the image is as follows> or basically anything that is outside of the task asked for. Just perform the instructed task. Response should be limited to the things that you are asked for, not anything more, nor anything less. Output must be provided in markdown format only."
-        prompt += auxiliary_prompt
-        img_str = crop_and_encode_image(image, element)
-        image_data = f"data:image/png;base64,{img_str}"
-
-        content = [
-            {"type": "text", "text": prompt},
-            {
-                "type": "image_url",
-                "image_url": {
-                    "url": image_data,
-                    "detail": "auto"
-                },
-            }
-        ]
-
-        try:
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {
-                        "role": "user",
-                        "content": content
-                    }
-                ],
-                max_tokens=3000,
-            )
-
-            full_result = response.choices[0].message.content.strip()
-        except Exception as e:
-            full_result = f"Error processing element: {str(e)}"
+        confidence = element["confidence"]
+        index = element["index"]
+        coordinates = element["coordinates"]
 
         if cls == "Table":
-            individual_results = full_result.split('---')
-            if len(individual_results) >= 2:
-                html_code = individual_results[0].strip()
-                summary = individual_results[1].strip()
-            else:
-                html_code = full_result.strip()
+            # Perform table extraction
+            table_image = crop_image(image, coordinates)
+            try:
+                markdown_table = table_extractor.extract_markdown(table_image)
+                html_table = table_extractor.extract_html(table_image)
+                summary = table_extractor.summarize_table(markdown_table)
+            except Exception as e:
+                markdown_table = f"Error extracting table: {str(e)}"
+                html_table = f"Error extracting table: {str(e)}"
                 summary = ""
             results.append({
-                "index": element["index"],
+                "index": index,
                 "class": cls,
-                "confidence": element["confidence"],
-                "html": html_code,
+                "confidence": confidence,
+                "html": html_table,
                 "summary": summary,
-                "coordinates": element["coordinates"]
+                "coordinates": coordinates
+            })
+        elif cls in ["Text", "Section-header", "Title", "Caption", "Footnote", "Page-header", "Page-footer", "List-item"]:
+            # Perform OCR
+            text_image = crop_image(image, coordinates)
+            try:
+                text = pytesseract.image_to_string(text_image)
+            except Exception as e:
+                text = f"Error during OCR: {str(e)}"
+            results.append({
+                "index": index,
+                "class": cls,
+                "confidence": confidence,
+                "result": text.strip(),
+                "coordinates": coordinates
+            })
+        elif cls == "Picture":
+            # Just display the image, no processing
+            picture_image = crop_image(image, coordinates)
+            buffered = io.BytesIO()
+            picture_image.save(buffered, format="PNG")
+            img_str = base64.b64encode(buffered.getvalue()).decode()
+            image_data = f"data:image/png;base64,{img_str}"
+            results.append({
+                "index": index,
+                "class": cls,
+                "confidence": confidence,
+                "image_data": image_data,
+                "coordinates": coordinates
             })
         else:
+            # Unknown class, attempt OCR as a fallback
+            unknown_image = crop_image(image, coordinates)
+            try:
+                text = pytesseract.image_to_string(unknown_image)
+            except Exception as e:
+                text = f"Error during OCR: {str(e)}"
             results.append({
-                "index": element["index"],
+                "index": index,
                 "class": cls,
-                "confidence": element["confidence"],
-                "result": full_result,
-                "coordinates": element["coordinates"]
+                "confidence": confidence,
+                "result": text.strip(),
+                "coordinates": coordinates
             })
 
     results.sort(key=lambda x: x["index"])
     return results
 
-# Implement the improved chunking algorithm
-def improved_intelligent_chunking_with_continuity(detected_elements, hierarchy, max_chunk_size=5):
+def intelligent_chunking(detected_elements, hierarchy, max_chunk_size=5):
     """
-    Group detected elements into larger chunks, considering content continuity.
-
-    Parameters:
-    - detected_elements: List of detected elements sorted by their position.
-    - hierarchy: List defining the priority of segment types.
-    - max_chunk_size: Maximum number of elements per chunk.
-
-    Returns:
-    - List of chunks, where each chunk is a dictionary containing elements and images.
+    Group detected elements into chunks based on the given hierarchy.
     """
     chunks = []
     current_chunk_elements = []
     content_hashes = set()
-    element_count = len(detected_elements)
 
     def hash_content(element):
         # Create a hash of the element's content to check for duplicates
@@ -458,201 +455,120 @@ def combine_elements_into_image(image, elements):
 
     return combined_image, adjusted_elements
 
-def determine_dominant_class(classes):
-    """
-    Determine the dominant class in a list of classes based on hierarchy.
-    """
-    for cls in SEGMENT_HIERARCHY:
-        if cls in classes:
-            return cls
-    return "Unknown"
-
-def encode_image(image):
-    """
-    Encode PIL image to base64 string.
-    """
-    # Maintain aspect ratio while resizing
-    max_size = (800, 800)
-    image.thumbnail(max_size, Image.LANCZOS)
-
-    buffered = io.BytesIO()
-    image.save(buffered, format="PNG")
-    img_str = base64.b64encode(buffered.getvalue()).decode()
-
-    return img_str
-
-def get_prompt_for_class(cls):
-    """
-    Get the prompt for a given class.
-    """
-    prompts = {
-        "Text": "Extract the text from the provided image.",
-        "Section-header": "Extract the text from the provided image.",
-        "Title": "Extract the text from the provided image.",
-        "Caption": "Extract the text from the provided image.",
-        "Footnote": "Extract the text from the provided image.",
-        "Page-header": "Extract the text from the provided image.",
-        "Page-footer": "Extract the text from the provided image.",
-        "List-item": "Extract the text from the provided image.",
-        "Table": "Generate the HTML code for the table in the provided image and provide a summary of the data in the table. The HTML should be semantically correct and use appropriate tags like <table>, <tr>, <th>, and <td>. Please output the results separated by '---'. First provide the HTML code, then a summary of the data.",
-        "Picture": "Provide a detailed description of the provided image. Extract any text/tables present in the image and give its html or markdown format, whichever is more suitable for you.",
-        "Formula": "Simplify the mathematical formula shown in the provided image. Give its latex formula if possible.",
-        "Unknown": "Describe the content of the provided image."
-    }
-    return prompts.get(cls, "Describe the content of the provided image.")
-
 def main():
-    st.title("📄 Document Element Classification with Extraction")
+    st.title("📄 Document Element Classification and Extraction")
 
-    # Step 1: Prompt user for OpenAI API Key if not already provided
-    if not st.session_state.openai_api_key:
-        st.header("🔑 Enter Your OpenAI API Key")
-        api_key_input = st.text_input(
-            "Please enter your OpenAI API key:",
-            type="password",
-            placeholder="sk-****************************",
-            help="You can obtain your API key from https://platform.openai.com/account/api-keys"
-        )
+    # File uploader
+    uploaded_files = st.file_uploader(
+        "Upload up to 2 scanned document images or a PDF",
+        type=["png", "jpg", "jpeg", "bmp", "tiff", "pdf"],
+        accept_multiple_files=True,
+        key="file_uploader"
+    )
 
-        if st.button("Submit API Key"):
-            if api_key_input.strip() == "":
-                st.error("API key cannot be empty. Please enter a valid OpenAI API key.")
-            else:
-                st.session_state.openai_api_key = api_key_input.strip()
-                st.success("API key successfully saved!")
-                # No rerun, the script will naturally continue rendering below
-
-    # Only proceed if API key is present
-    if st.session_state.openai_api_key:
-        OPENAI_API_KEY = st.session_state.openai_api_key
-        client = OpenAI(api_key=OPENAI_API_KEY)
-
-        # Initialize session state variables
-        if 'uploaded_files_contents' not in st.session_state:
-            st.session_state.uploaded_files_contents = None
-
-        if 'images_with_info' not in st.session_state:
-            st.session_state.images_with_info = []
-
-        if 'detected_elements' not in st.session_state:
-            st.session_state.detected_elements = {}
-
-        if 'chunks' not in st.session_state:
-            st.session_state.chunks = {}
-
-        if 'all_results' not in st.session_state:
-            st.session_state.all_results = {}
-
-        # File uploader
-        uploaded_files = st.file_uploader(
-            "Upload up to 2 scanned document images or a PDF",
-            type=["png", "jpg", "jpeg", "bmp", "tiff", "pdf"],
-            accept_multiple_files=True,
-            key="file_uploader"
-        )
-
-        if uploaded_files:
-            # Read and store the contents of the uploaded files
+    if uploaded_files:
+        # Read and store the contents of the uploaded files
+        uploaded_files_contents = []
+        for file in uploaded_files:
+            file_content = file.read()
+            file.seek(0)  # Reset the file pointer
+            uploaded_files_contents.append({
+                'name': file.name,
+                'type': file.type,
+                'content': file_content
+            })
+        st.session_state.uploaded_files_contents = uploaded_files_contents
+        # Clear previous session state data when new files are uploaded
+        st.session_state.images_with_info = []
+        st.session_state.detected_elements = {}
+        st.session_state.chunks = {}
+        st.session_state.all_results = {}
+    else:
+        if 'uploaded_files_contents' in st.session_state:
+            uploaded_files_contents = st.session_state.uploaded_files_contents
+        else:
             uploaded_files_contents = []
-            for file in uploaded_files:
-                file_content = file.read()
-                file.seek(0)  # Reset the file pointer
-                uploaded_files_contents.append({
-                    'name': file.name,
-                    'type': file.type,
-                    'content': file_content
-                })
-            st.session_state.uploaded_files_contents = uploaded_files_contents
-            # Clear previous session state data when new files are uploaded
-            st.session_state.images_with_info = []
-            st.session_state.detected_elements = {}
-            st.session_state.chunks = {}
-            st.session_state.all_results = {}
+
+    if not uploaded_files_contents:
+        st.error("Please upload a file to proceed.")
+        st.stop()
+    else:
+        # Process uploaded files
+        if not st.session_state.images_with_info:
+            images_with_info = []
+            for file_info in uploaded_files_contents:
+                if file_info['type'] == "application/pdf":
+                    # Process PDF
+                    pdf_document = fitz.open(stream=file_info['content'], filetype="pdf")
+                    images_from_pdf = process_pdf(pdf_document)
+                    if not images_from_pdf:
+                        st.error("Error processing PDF.")
+                        st.stop()
+                    images_with_info.extend(images_from_pdf)
+                else:
+                    # For images, we'll assume each image is a page
+                    image = Image.open(io.BytesIO(file_info['content'])).convert("RGB")
+                    images_with_info.append((image, [0], image.height))
+            st.session_state.images_with_info = images_with_info
         else:
-            if 'uploaded_files_contents' in st.session_state:
-                uploaded_files_contents = st.session_state.uploaded_files_contents
-            else:
-                uploaded_files_contents = []
+            images_with_info = st.session_state.images_with_info
 
-        if not uploaded_files_contents:
-            st.error("Please upload a file to proceed.")
-            st.stop()
-        else:
-            # Process uploaded files
-            if not st.session_state.images_with_info:
-                images_with_info = []
-                for file_info in uploaded_files_contents:
-                    if file_info['type'] == "application/pdf":
-                        # Process PDF
-                        pdf_document = fitz.open(stream=file_info['content'], filetype="pdf")
-                        images_from_pdf = process_pdf(pdf_document)
-                        if not images_from_pdf:
-                            st.stop()
-                        images_with_info.extend(images_from_pdf)
-                    else:
-                        # For images, we'll assume each image is a page
-                        image = Image.open(io.BytesIO(file_info['content']))
-                        images_with_info.append((image, [0], image.height))
-                st.session_state.images_with_info = images_with_info
-            else:
-                images_with_info = st.session_state.images_with_info
+        for idx, (image, page_numbers, page_boundary) in enumerate(images_with_info):
+            st.header(f"Processing Pages {page_numbers}")
 
-            for idx, (image, page_numbers, page_boundary) in enumerate(images_with_info):
-                st.header(f"Processing Pages {page_numbers}")
+            # Create two columns for annotated image and responses
+            col1, col2 = st.columns([1, 2])
 
-                # Create two columns for annotated image and responses
-                col1, col2 = st.columns([1, 2])
+            with col1:
+                st.subheader("Annotated Image")
+                st.image(image, caption=f"📥 Uploaded Pages {page_numbers}", use_column_width=True)
 
-                with col1:
-                    st.subheader("Annotated Image")
-                    st.image(image, caption=f"📥 Uploaded Pages {page_numbers}", use_column_width=True)
+            with col2:
+                st.subheader("Detected Elements and Chunks")
+                detect_button_key = f"detect_{idx}"
+                if st.button(f"🔍 Detect Elements and Create Chunks for Pages {page_numbers}", key=detect_button_key):
+                    with st.spinner(f"Processing Pages {page_numbers}..."):
+                        result_image, detected_elements = detect(image, page_numbers, page_boundary)
+                        # Update the annotated image in col1
+                        col1.image(result_image, caption=f"✅ Detected Elements in Pages {page_numbers}", use_column_width=True)
 
-                with col2:
-                    st.subheader("Detected Elements and Chunks")
-                    detect_button_key = f"detect_{idx}"
-                    if st.button(f"🔍 Detect Elements and Create Chunks for Pages {page_numbers}", key=detect_button_key):
-                        with st.spinner(f"Processing Pages {page_numbers}..."):
-                            result_image, detected_elements = detect(image, page_numbers, page_boundary)
-                            # Update the annotated image in col1
-                            col1.image(result_image, caption=f"✅ Detected Elements in Pages {page_numbers}", use_column_width=True)
+                        if detected_elements:
+                            st.write(f"Detected {len(detected_elements)} element(s) in Pages {page_numbers}. Creating chunks...")
 
-                            if detected_elements:
-                                st.write(f"Detected {len(detected_elements)} element(s) in Pages {page_numbers}. Creating chunks...")
+                            # Apply the chunking algorithm
+                            chunks = intelligent_chunking(detected_elements, SEGMENT_HIERARCHY, max_chunk_size=10)
+                            st.write(f"Generated {len(chunks)} chunk(s) from detected elements.")
 
-                                # Apply the chunking algorithm
-                                chunks = improved_intelligent_chunking_with_continuity(detected_elements, SEGMENT_HIERARCHY, max_chunk_size=10)
-                                st.write(f"Generated {len(chunks)} chunk(s) from detected elements.")
+                            # For each chunk, generate the images and store them
+                            for chunk_idx, chunk in enumerate(chunks):
+                                # Combine elements into an image
+                                chunk_image, adjusted_elements = combine_elements_into_image(image, chunk['elements'])
+                                # Run detection on the chunk image to get the annotated image
+                                annotated_chunk_image, _ = detect(chunk_image)
 
-                                # For each chunk, generate the images and store them
-                                for chunk_idx, chunk in enumerate(chunks):
-                                    # Combine elements into an image
-                                    chunk_image, adjusted_elements = combine_elements_into_image(image, chunk['elements'])
-                                    # Run detection on the chunk image to get the annotated image
-                                    annotated_chunk_image, _ = detect(chunk_image)
+                                # Store images and chunk index in the chunk data
+                                chunk['chunk_index'] = chunk_idx
+                                chunk['original_image'] = chunk_image
+                                chunk['annotated_image'] = annotated_chunk_image
+                                # Update elements with adjusted coordinates
+                                chunk['elements'] = adjusted_elements
 
-                                    # Store images and chunk index in the chunk data
-                                    chunk['chunk_index'] = chunk_idx
-                                    chunk['original_image'] = chunk_image
-                                    chunk['annotated_image'] = annotated_chunk_image
-                                    # Update elements with adjusted coordinates
-                                    chunk['elements'] = adjusted_elements
+                            # Store detected elements and chunks in session state
+                            st.session_state.detected_elements[idx] = detected_elements
+                            st.session_state.chunks[idx] = chunks
 
-                                # Store detected elements and chunks in session state
-                                st.session_state.detected_elements[idx] = detected_elements
-                                st.session_state.chunks[idx] = chunks
-
-                                # Display chunks
-                                display_chunks(idx, chunks, page_numbers)
-                            else:
-                                st.write(f"No elements detected in Pages {page_numbers}.")
-                    else:
-                        # Check if detected elements and chunks are in session state
-                        if idx in st.session_state.chunks:
-                            chunks = st.session_state.chunks[idx]
                             # Display chunks
                             display_chunks(idx, chunks, page_numbers)
                         else:
-                            st.info("Please click the button above to detect elements and create chunks.")
+                            st.write(f"No elements detected in Pages {page_numbers}.")
+                else:
+                    # Check if detected elements and chunks are in session state
+                    if idx in st.session_state.chunks:
+                        chunks = st.session_state.chunks[idx]
+                        # Display chunks
+                        display_chunks(idx, chunks, page_numbers)
+                    else:
+                        st.info("Please click the button above to detect elements and create chunks.")
 
 def display_chunks(idx, chunks, page_numbers):
     """
@@ -682,13 +598,17 @@ def display_chunks(idx, chunks, page_numbers):
                     st.code(result.get('html', ''), language='html')
                     st.markdown("**Summary:**")
                     st.write(result.get('summary', ''))
+                elif result['class'] == "Picture":
+                    st.markdown("**Image:**")
+                    st.image(result.get('image_data', ''), use_column_width=True)
                 else:
                     st.write(result.get('result', ''))
         else:
             # Process the chunk's elements
             with st.spinner(f"Processing Chunk {chunk_idx+1}..."):
-                # Process elements individually
-                chunk_results = process_elements(chunk['original_image'], chunk['elements'], st.session_state.openai_api_key)
+                # Submit processing to the ThreadPoolExecutor
+                future = executor.submit(process_elements, chunk['original_image'], chunk['elements'])
+                chunk_results = future.result()
 
                 # Store the results
                 if idx not in st.session_state.all_results:
@@ -700,9 +620,12 @@ def display_chunks(idx, chunks, page_numbers):
                 })
 
                 # Save all results to response.json
-                with open("response.json", "w") as f:
-                    json.dump(st.session_state.all_results, f, indent=4)
-                st.success(f"Processing complete for Chunk {chunk_idx+1}. Results saved to response.json.")
+                try:
+                    with open("response.json", "w") as f:
+                        json.dump(st.session_state.all_results, f, indent=4)
+                    st.success(f"Processing complete for Chunk {chunk_idx+1}. Results saved to response.json.")
+                except Exception as e:
+                    st.error(f"Error writing response file: {str(e)}")
 
                 # Display results for each element
                 st.markdown(f"#### Results for Chunk {chunk_idx+1}:")
@@ -713,6 +636,9 @@ def display_chunks(idx, chunks, page_numbers):
                         st.code(result.get('html', ''), language='html')
                         st.markdown("**Summary:**")
                         st.write(result.get('summary', ''))
+                    elif result['class'] == "Picture":
+                        st.markdown("**Image:**")
+                        st.image(result.get('image_data', ''), use_column_width=True)
                     else:
                         st.write(result.get('result', ''))
 
