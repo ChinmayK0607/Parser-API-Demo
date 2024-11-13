@@ -12,11 +12,12 @@ import os
 import gdown
 import pytesseract
 from table_module import TableExtractor  # Ensure this is defined in table_module.py
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
+from tqdm.auto import tqdm
 
 # Set page config at the very beginning
-st.set_page_config(page_title="Document Element Classification", layout="wide")
+st.set_page_config(page_title="📄 Document Element Classification and Extraction", layout="wide")
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s:%(message)s')
@@ -38,7 +39,7 @@ ENTITIES_COLORS = {
 }
 BOX_PADDING = 2
 
-# Define the hierarchy for chunking
+# Define the hierarchy for chunking (not used anymore but kept for potential future use)
 SEGMENT_HIERARCHY = [
     "Section-header",
     "Title",
@@ -67,9 +68,6 @@ if 'images_with_info' not in st.session_state:
 
 if 'detected_elements' not in st.session_state:
     st.session_state.detected_elements = {}
-
-if 'chunks' not in st.session_state:
-    st.session_state.chunks = {}
 
 if 'all_results' not in st.session_state:
     st.session_state.all_results = {}
@@ -312,18 +310,14 @@ def process_elements(image, elements):
             table_image = crop_image(image, coordinates)
             try:
                 markdown_table = table_extractor.extract_markdown(table_image)
-                html_table = table_extractor.extract_html(table_image)
-                summary = table_extractor.summarize_table(markdown_table)
+                # Since TableExtractor returns Markdown, we will use it directly
             except Exception as e:
                 markdown_table = f"Error extracting table: {str(e)}"
-                html_table = f"Error extracting table: {str(e)}"
-                summary = ""
             results.append({
                 "index": index,
                 "class": cls,
                 "confidence": confidence,
-                "html": html_table,
-                "summary": summary,
+                "markdown": markdown_table,
                 "coordinates": coordinates
             })
         elif cls in ["Text", "Section-header", "Title", "Caption", "Footnote", "Page-header", "Page-footer", "List-item"]:
@@ -467,6 +461,10 @@ def main():
     )
 
     if uploaded_files:
+        if len(uploaded_files) > 2:
+            st.warning("Please upload a maximum of 2 files.")
+            st.stop()
+
         # Read and store the contents of the uploaded files
         uploaded_files_contents = []
         for file in uploaded_files:
@@ -481,7 +479,6 @@ def main():
         # Clear previous session state data when new files are uploaded
         st.session_state.images_with_info = []
         st.session_state.detected_elements = {}
-        st.session_state.chunks = {}
         st.session_state.all_results = {}
     else:
         if 'uploaded_files_contents' in st.session_state:
@@ -507,8 +504,11 @@ def main():
                     images_with_info.extend(images_from_pdf)
                 else:
                     # For images, we'll assume each image is a page
-                    image = Image.open(io.BytesIO(file_info['content'])).convert("RGB")
-                    images_with_info.append((image, [0], image.height))
+                    try:
+                        image = Image.open(io.BytesIO(file_info['content'])).convert("RGB")
+                        images_with_info.append((image, [0], image.height))
+                    except Exception as e:
+                        st.error(f"Error opening image {file_info['name']}: {e}")
             st.session_state.images_with_info = images_with_info
         else:
             images_with_info = st.session_state.images_with_info
@@ -524,123 +524,81 @@ def main():
                 st.image(image, caption=f"📥 Uploaded Pages {page_numbers}", use_column_width=True)
 
             with col2:
-                st.subheader("Detected Elements and Chunks")
+                st.subheader("Detected Elements and Extraction")
                 detect_button_key = f"detect_{idx}"
-                if st.button(f"🔍 Detect Elements and Create Chunks for Pages {page_numbers}", key=detect_button_key):
+                if st.button(f"🔍 Detect Elements for Pages {page_numbers}", key=detect_button_key):
                     with st.spinner(f"Processing Pages {page_numbers}..."):
                         result_image, detected_elements = detect(image, page_numbers, page_boundary)
                         # Update the annotated image in col1
                         col1.image(result_image, caption=f"✅ Detected Elements in Pages {page_numbers}", use_column_width=True)
 
                         if detected_elements:
-                            st.write(f"Detected {len(detected_elements)} element(s) in Pages {page_numbers}. Creating chunks...")
+                            st.write(f"Detected {len(detected_elements)} element(s) in Pages {page_numbers}. Processing...")
 
-                            # Apply the chunking algorithm
-                            chunks = intelligent_chunking(detected_elements, SEGMENT_HIERARCHY, max_chunk_size=10)
-                            st.write(f"Generated {len(chunks)} chunk(s) from detected elements.")
-
-                            # For each chunk, generate the images and store them
-                            for chunk_idx, chunk in enumerate(chunks):
-                                # Combine elements into an image
-                                chunk_image, adjusted_elements = combine_elements_into_image(image, chunk['elements'])
-                                # Run detection on the chunk image to get the annotated image
-                                annotated_chunk_image, _ = detect(chunk_image)
-
-                                # Store images and chunk index in the chunk data
-                                chunk['chunk_index'] = chunk_idx
-                                chunk['original_image'] = chunk_image
-                                chunk['annotated_image'] = annotated_chunk_image
-                                # Update elements with adjusted coordinates
-                                chunk['elements'] = adjusted_elements
-
-                            # Store detected elements and chunks in session state
+                            # Store detected elements
                             st.session_state.detected_elements[idx] = detected_elements
-                            st.session_state.chunks[idx] = chunks
 
-                            # Display chunks
-                            display_chunks(idx, chunks, page_numbers)
+                            # Submit processing to the ThreadPoolExecutor
+                            future = executor.submit(process_elements, image, detected_elements)
+
+                            # Asynchronously display results as they complete
+                            with st.spinner("Extracting information from detected elements..."):
+                                try:
+                                    chunk_results = future.result(timeout=300)  # Set timeout as needed
+                                except Exception as e:
+                                    st.error(f"Error during processing: {e}")
+                                    continue
+
+                            # Store the results
+                            st.session_state.all_results[idx] = chunk_results
+
+                            # Save all results to response.json
+                            try:
+                                with open("response.json", "w") as f:
+                                    json.dump(st.session_state.all_results, f, indent=4)
+                                st.success("Processing complete. Results saved to response.json.")
+                            except Exception as e:
+                                st.error(f"Error writing response file: {e}")
+
+                            # Display results for each element
+                            st.markdown(f"#### Extracted Information for Pages {page_numbers}:")
+                            for result in chunk_results:
+                                st.markdown(f"**Element {result['index']} ({result['class']}):**")
+                                if result['class'] == "Table":
+                                    st.markdown("**Extracted Table (Markdown):**")
+                                    st.markdown(result.get('markdown', ''))
+                                elif result['class'] in ["Text", "Section-header", "Title", "Caption", "Footnote", "Page-header", "Page-footer", "List-item"]:
+                                    st.markdown("**Extracted Text:**")
+                                    st.write(result.get('result', ''))
+                                elif result['class'] == "Picture":
+                                    st.markdown("**Picture:**")
+                                    st.image(result.get('image_data', ''), use_column_width=True)
+                                else:
+                                    st.markdown("**Extracted Content:**")
+                                    st.write(result.get('result', ''))
                         else:
                             st.write(f"No elements detected in Pages {page_numbers}.")
                 else:
-                    # Check if detected elements and chunks are in session state
-                    if idx in st.session_state.chunks:
-                        chunks = st.session_state.chunks[idx]
-                        # Display chunks
-                        display_chunks(idx, chunks, page_numbers)
+                    # Check if detected elements and results are in session state
+                    if idx in st.session_state.all_results:
+                        chunk_results = st.session_state.all_results[idx]
+                        st.markdown(f"#### Extracted Information for Pages {page_numbers}:")
+                        for result in chunk_results:
+                            st.markdown(f"**Element {result['index']} ({result['class']}):**")
+                            if result['class'] == "Table":
+                                st.markdown("**Extracted Table (Markdown):**")
+                                st.markdown(result.get('markdown', ''))
+                            elif result['class'] in ["Text", "Section-header", "Title", "Caption", "Footnote", "Page-header", "Page-footer", "List-item"]:
+                                st.markdown("**Extracted Text:**")
+                                st.write(result.get('result', ''))
+                            elif result['class'] == "Picture":
+                                st.markdown("**Picture:**")
+                                st.image(result.get('image_data', ''), use_column_width=True)
+                            else:
+                                st.markdown("**Extracted Content:**")
+                                st.write(result.get('result', ''))
                     else:
-                        st.info("Please click the button above to detect elements and create chunks.")
-
-def display_chunks(idx, chunks, page_numbers):
-    """
-    Helper function to display chunks and process them.
-    """
-    for chunk_idx, chunk in enumerate(chunks):
-        st.markdown(f"### Chunk {chunk_idx+1}")
-        chunk_classes = [element['class'] for element in chunk['elements']]
-        st.write(f"**Classes in chunk:** {chunk_classes}")
-        for element in chunk['elements']:
-            st.write(f"- Element {element['index']}: {element['class']} on page {element['page_number']}")
-        # Display chunk images using expander
-        with st.expander(f"Show Chunk {chunk_idx+1} Images"):
-            # Display the original chunk image
-            st.image(chunk['original_image'], caption=f"Original Chunk {chunk_idx+1} Image", use_column_width=True)
-            # Display the annotated chunk image
-            st.image(chunk['annotated_image'], caption=f"Annotated Chunk {chunk_idx+1} Image", use_column_width=True)
-
-        # Check if result already exists
-        if idx in st.session_state.all_results and len(st.session_state.all_results[idx]) > chunk_idx:
-            chunk_results = st.session_state.all_results[idx][chunk_idx]["chunk_results"]
-            st.markdown(f"#### Results for Chunk {chunk_idx+1}:")
-            for result in chunk_results:
-                st.markdown(f"**Element {result['index']} ({result['class']}):**")
-                if result['class'] == "Table":
-                    st.markdown("**HTML Code:**")
-                    st.code(result.get('html', ''), language='html')
-                    st.markdown("**Summary:**")
-                    st.write(result.get('summary', ''))
-                elif result['class'] == "Picture":
-                    st.markdown("**Image:**")
-                    st.image(result.get('image_data', ''), use_column_width=True)
-                else:
-                    st.write(result.get('result', ''))
-        else:
-            # Process the chunk's elements
-            with st.spinner(f"Processing Chunk {chunk_idx+1}..."):
-                # Submit processing to the ThreadPoolExecutor
-                future = executor.submit(process_elements, chunk['original_image'], chunk['elements'])
-                chunk_results = future.result()
-
-                # Store the results
-                if idx not in st.session_state.all_results:
-                    st.session_state.all_results[idx] = []
-                st.session_state.all_results[idx].append({
-                    "pages": page_numbers,
-                    "chunk_index": chunk_idx,
-                    "chunk_results": chunk_results
-                })
-
-                # Save all results to response.json
-                try:
-                    with open("response.json", "w") as f:
-                        json.dump(st.session_state.all_results, f, indent=4)
-                    st.success(f"Processing complete for Chunk {chunk_idx+1}. Results saved to response.json.")
-                except Exception as e:
-                    st.error(f"Error writing response file: {str(e)}")
-
-                # Display results for each element
-                st.markdown(f"#### Results for Chunk {chunk_idx+1}:")
-                for result in chunk_results:
-                    st.markdown(f"**Element {result['index']} ({result['class']}):**")
-                    if result['class'] == "Table":
-                        st.markdown("**HTML Code:**")
-                        st.code(result.get('html', ''), language='html')
-                        st.markdown("**Summary:**")
-                        st.write(result.get('summary', ''))
-                    elif result['class'] == "Picture":
-                        st.markdown("**Image:**")
-                        st.image(result.get('image_data', ''), use_column_width=True)
-                    else:
-                        st.write(result.get('result', ''))
+                        st.info("Click the button above to detect elements and extract information.")
 
 if __name__ == "__main__":
     main()
